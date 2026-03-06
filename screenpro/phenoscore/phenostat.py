@@ -149,7 +149,110 @@ def multipleTestsCorrection(p_values, method='fdr_bh'):
     return adj_p_values
 
 
-def empiricalFDR():
-    # TODO: implement empirical FDR calculation based on null distribution of p-values from non-targeting controls, 
-    # see https://github.com/ArcInstitute/ScreenPro2/issues/83
-    pass
+def empiricalPValue(scores, null_scores, tail='two-sided'):
+    """Calculate empirical p-values by comparing scores to a null distribution.
+
+    For each score in ``scores``, the empirical p-value is the proportion of
+    null scores that are at least as extreme as the observed score. A pseudocount
+    of 1 is added to both numerator and denominator to avoid p-values of zero
+    and to account for the finite size of the null distribution.
+
+    Parameters:
+        scores (array-like): observed phenotype scores
+        null_scores (array-like): null/non-targeting control scores
+        tail (str): 'two-sided' (default), 'less', or 'greater'
+
+    Returns:
+        np.array: array of empirical p-values in [0, 1]
+    """
+    scores = np.asarray(scores, dtype=float)
+    null_scores = np.asarray(null_scores, dtype=float)
+    null_scores = null_scores[~np.isnan(null_scores)]
+    n_null = len(null_scores)
+
+    if n_null == 0:
+        return np.full(len(scores), np.nan)
+
+    p_values = np.empty(len(scores))
+
+    for i, score in enumerate(scores):
+        if np.isnan(score):
+            p_values[i] = np.nan
+            continue
+
+        if tail == 'two-sided':
+            n_extreme = np.sum(np.abs(null_scores) >= np.abs(score))
+        elif tail == 'less':
+            n_extreme = np.sum(null_scores <= score)
+        elif tail == 'greater':
+            n_extreme = np.sum(null_scores >= score)
+        else:
+            raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
+
+        # pseudocount of 1 in numerator and denominator
+        p_values[i] = (n_extreme + 1) / (n_null + 1)
+
+    return p_values
+
+
+def empiricalFDR(scores, null_scores, tail='two-sided'):
+    """Calculate empirical FDR by comparing scores to a null distribution.
+
+    For each threshold defined by an observed score, the empirical FDR is:
+
+    .. math::
+
+        \\text{FDR}(s) = \\frac{\\text{expected false positives}}{\\text{observed positives}}
+
+    where *expected false positives* = ``(# null extreme) / n_null * n_genes``
+    and *observed positives* = ``# gene scores at least as extreme as s``.
+
+    This approach provides direct FDR control using the empirical null distribution
+    from non-targeting controls, without relying on parametric assumptions or
+    multiple-testing correction procedures.
+
+    Parameters:
+        scores (array-like): observed phenotype scores (e.g. targeting genes)
+        null_scores (array-like): null/non-targeting control scores
+        tail (str): 'two-sided' (default), 'less', or 'greater'
+
+    Returns:
+        np.array: array of empirical FDR values clipped to [0, 1]
+    """
+    scores = np.asarray(scores, dtype=float)
+    null_scores = np.asarray(null_scores, dtype=float)
+    null_scores = null_scores[~np.isnan(null_scores)]
+    n_null = len(null_scores)
+    n_genes = np.sum(~np.isnan(scores))
+
+    if n_null == 0 or n_genes == 0:
+        return np.full(len(scores), np.nan)
+
+    fdr_values = np.empty(len(scores))
+
+    for i, score in enumerate(scores):
+        if np.isnan(score):
+            fdr_values[i] = np.nan
+            continue
+
+        if tail == 'two-sided':
+            n_extreme_null = np.sum(np.abs(null_scores) >= np.abs(score))
+            n_extreme_genes = np.sum(np.abs(scores[~np.isnan(scores)]) >= np.abs(score))
+        elif tail == 'less':
+            n_extreme_null = np.sum(null_scores <= score)
+            n_extreme_genes = np.sum(scores[~np.isnan(scores)] <= score)
+        elif tail == 'greater':
+            n_extreme_null = np.sum(null_scores >= score)
+            n_extreme_genes = np.sum(scores[~np.isnan(scores)] >= score)
+        else:
+            raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
+
+        # expected false positives normalized to gene sample size
+        expected_fp = (n_extreme_null / n_null) * n_genes
+
+        if n_extreme_genes > 0:
+            fdr_values[i] = min(expected_fp / n_extreme_genes, 1.0)
+        else:
+            fdr_values[i] = 0.0
+
+    return fdr_values

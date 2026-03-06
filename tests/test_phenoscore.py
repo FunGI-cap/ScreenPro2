@@ -4,7 +4,7 @@ import anndata as ad
 import pandas as pd
 import pytest
 from screenpro.phenoscore import runPhenoScore
-from screenpro.phenoscore.phenostat import matrixStat
+from screenpro.phenoscore.phenostat import matrixStat, empiricalPValue, empiricalFDR
 
 
 def _make_test_matrices():
@@ -178,3 +178,142 @@ def test_runPhenoScore():
 
     # check result dataframe
     assert isinstance(result, pd.DataFrame)
+
+# ── empiricalPValue tests ──────────────────────────────────────────────────────
+
+def _make_score_arrays(seed=0):
+    rng = np.random.default_rng(seed)
+    scores = rng.standard_normal(20)
+    null_scores = rng.standard_normal(100)
+    return scores, null_scores
+
+
+def test_empiricalPValue_two_sided_range():
+    scores, null_scores = _make_score_arrays()
+    p = empiricalPValue(scores, null_scores, tail='two-sided')
+    assert p.shape == (len(scores),)
+    assert np.all((p > 0) & (p <= 1))
+
+
+def test_empiricalPValue_less_range():
+    scores, null_scores = _make_score_arrays()
+    p = empiricalPValue(scores, null_scores, tail='less')
+    assert np.all((p > 0) & (p <= 1))
+
+
+def test_empiricalPValue_greater_range():
+    scores, null_scores = _make_score_arrays()
+    p = empiricalPValue(scores, null_scores, tail='greater')
+    assert np.all((p > 0) & (p <= 1))
+
+
+def test_empiricalPValue_nan_input():
+    scores = np.array([1.0, np.nan, -1.0])
+    null_scores = np.array([0.5, -0.5, 0.0])
+    p = empiricalPValue(scores, null_scores)
+    assert np.isnan(p[1])
+    assert not np.isnan(p[0])
+    assert not np.isnan(p[2])
+
+
+def test_empiricalPValue_empty_null():
+    scores = np.array([1.0, 2.0])
+    null_scores = np.array([])
+    p = empiricalPValue(scores, null_scores)
+    assert np.all(np.isnan(p))
+
+
+def test_empiricalPValue_invalid_tail():
+    scores, null_scores = _make_score_arrays()
+    with pytest.raises(ValueError, match='not recognized'):
+        empiricalPValue(scores, null_scores, tail='invalid')
+
+
+def test_empiricalPValue_extreme_score_low_pvalue():
+    """A score far from the null distribution should have a small p-value."""
+    null_scores = np.zeros(1000)
+    extreme_score = np.array([100.0])
+    p = empiricalPValue(extreme_score, null_scores, tail='two-sided')
+    assert p[0] < 0.01
+
+
+# ── empiricalFDR tests ─────────────────────────────────────────────────────────
+
+def test_empiricalFDR_range():
+    scores, null_scores = _make_score_arrays()
+    fdr = empiricalFDR(scores, null_scores, tail='two-sided')
+    assert fdr.shape == (len(scores),)
+    assert np.all(((fdr >= 0) & (fdr <= 1)) | np.isnan(fdr))
+
+
+def test_empiricalFDR_nan_input():
+    scores = np.array([1.0, np.nan, -1.0])
+    null_scores = np.array([0.5, -0.5, 0.0])
+    fdr = empiricalFDR(scores, null_scores)
+    assert np.isnan(fdr[1])
+    assert not np.isnan(fdr[0])
+    assert not np.isnan(fdr[2])
+
+
+def test_empiricalFDR_empty_null():
+    scores = np.array([1.0, 2.0])
+    null_scores = np.array([])
+    fdr = empiricalFDR(scores, null_scores)
+    assert np.all(np.isnan(fdr))
+
+
+def test_empiricalFDR_invalid_tail():
+    scores, null_scores = _make_score_arrays()
+    with pytest.raises(ValueError, match='not recognized'):
+        empiricalFDR(scores, null_scores, tail='invalid')
+
+
+def test_empiricalFDR_extreme_score_low_fdr():
+    """Scores far from the null distribution should yield low FDR."""
+    rng = np.random.default_rng(42)
+    null_scores = rng.standard_normal(1000)
+    scores = np.array([10.0, 11.0, 12.0])
+    fdr = empiricalFDR(scores, null_scores, tail='two-sided')
+    assert np.all(fdr < 0.05)
+
+
+# ── runPhenoScore new columns ──────────────────────────────────────────────────
+
+def test_runPhenoScore_has_empirical_columns():
+    """Verify runPhenoScore result includes empirical pvalue and FDR columns."""
+    rng = np.random.default_rng(7)
+    cond_A = rng.integers(10, 30, size=(3, 10))
+    cond_B = rng.integers(50, 100, size=(3, 10))
+
+    adat = ad.AnnData(
+        X=np.concatenate([cond_A, cond_B], axis=0).astype(float),
+        obs=pd.DataFrame(
+            {'condition': ['A'] * 3 + ['B'] * 3},
+            index=pd.Index(['sample_' + str(i) for i in range(6)], name='sample')
+        ),
+        var=pd.DataFrame(
+            {
+                'target': ['targetID_' + str(i) for i in range(10)],
+                'targetType': ['gene'] * 8 + ['negative_control'] * 2
+            },
+            index=pd.Index(['targetID_' + str(i) for i in range(10)], name='target')
+        )
+    )
+
+    _, result = runPhenoScore(
+        adata=adat,
+        cond_ref='A',
+        cond_test='B',
+        test='ttest',
+        score_level='compare_reps',
+        growth_rate=1,
+        n_reps=3,
+        ctrl_label='negative_control'
+    )
+
+    assert 'empirical pvalue' in result.columns
+    assert 'empirical FDR' in result.columns
+    emp_p = result['empirical pvalue'].dropna()
+    emp_fdr = result['empirical FDR'].dropna()
+    assert np.all((emp_p > 0) & (emp_p <= 1))
+    assert np.all((emp_fdr >= 0) & (emp_fdr <= 1))
