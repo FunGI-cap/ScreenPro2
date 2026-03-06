@@ -150,4 +150,6 @@ def multipleTestsCorrection(p_values, method='fdr_bh'):
 
 
 def empiricalFDR():
+    # TODO: implement empirical FDR calculation based on null distribution of p-values from non-targeting controls, 
+    # see https://github.com/ArcInstitute/ScreenPro2/issues/83
     pass
