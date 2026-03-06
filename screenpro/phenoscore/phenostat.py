@@ -51,7 +51,7 @@ def matrixStat(x, y, test, level, transform='log10'):
         raise ValueError(f'Transform "{transform}" not recognized')
     
     # calculate p-values
-    if test == 'MW':
+    if test == 'MW' or test == 'Mann-Whitney':
         # run Mann-Whitney U rank test (non-parametric, independent samples)
         if level == 'col':
             p_value = np.array([
@@ -69,7 +69,7 @@ def matrixStat(x, y, test, level, transform='log10'):
             raise ValueError(f'Level "{level}" not recognized')
         return p_value
 
-    elif test == 'KS':
+    elif test == 'KS' or test == 'Kolmogorov-Smirnov':
         # run Kolmogorov-Smirnov test (non-parametric, two-sample)
         if level == 'col':
             p_value = np.array([
@@ -87,7 +87,7 @@ def matrixStat(x, y, test, level, transform='log10'):
             raise ValueError(f'Level "{level}" not recognized')
         return p_value
 
-    elif test == 'ttest':
+    elif test == 'TT' or test == 'ttest' or test == 'T-test':
         # run paired t-test (parametric); suppress SmallSampleWarning since small
         # sample sizes (e.g. 2-3 replicates) are expected in CRISPR screens
         with warnings.catch_warnings():
