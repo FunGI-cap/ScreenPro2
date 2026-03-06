@@ -6,7 +6,8 @@ import anndata as ad
 import pandas as pd
 
 from .phenostat import (
-    matrixStat, multipleTestsCorrection
+    matrixStat, multipleTestsCorrection,
+    empiricalPValue, empiricalFDR
 )
 
 
@@ -64,6 +65,13 @@ def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', te
     # get adjusted p-values
     adj_p_values = multipleTestsCorrection(p_values)
 
+    # compute empirical p-values and FDR using non-targeting control score distribution
+    scores_array = np.array(scores)
+    ctrl_mask = adat.var.targetType.eq(ctrl_label).values
+    null_scores = scores_array[ctrl_mask]
+    emp_p_values = empiricalPValue(scores_array, null_scores)
+    emp_fdr_values = empiricalFDR(scores_array, null_scores)
+
     # get target information            
     targets_df = adat.var[var_names].copy()
 
@@ -72,6 +80,8 @@ def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', te
         pd.Series(scores, index=adat.var.index, name='score'),
         pd.Series(p_values, index=adat.var.index, name=f'{test} pvalue'),
         pd.Series(adj_p_values, index=adat.var.index, name='BH adj_pvalue'),
+        pd.Series(emp_p_values, index=adat.var.index, name='empirical pvalue'),
+        pd.Series(emp_fdr_values, index=adat.var.index, name='empirical FDR'),
     ], axis=1)
     
     # add targets information 
@@ -145,6 +155,23 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
     # get adjusted p-values
     adj_p_values = multipleTestsCorrection(np.array(p_values))
 
+    # compute empirical p-values and FDR using pseudogene (null) score distribution
+    scores_array = np.array(scores)
+    # Identify null (control) targets using the targetType annotation, falling back
+    # to an empty null distribution if the annotation is not available.
+    _var_key = var_names if isinstance(var_names, str) else var_names[0]
+    if 'targetType' in adat.var.columns:
+        target_type_map = adat.var.groupby(_var_key)['targetType'].first()
+        null_mask = np.array([
+            target_type_map.get(t if isinstance(t, str) else t[0], '') == ctrl_label
+            for t in targets
+        ])
+    else:
+        null_mask = np.zeros(len(targets), dtype=bool)
+    null_scores = scores_array[null_mask]
+    emp_p_values = empiricalPValue(scores_array, null_scores)
+    emp_fdr_values = empiricalFDR(scores_array, null_scores)
+
     # get target information
     if type(var_names) == str:
         targets_df = pd.DataFrame(targets, columns=[var_names])
@@ -156,6 +183,8 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
         pd.Series(scores, name='score', dtype=float),
         pd.Series(p_values, name=f'{test} pvalue', dtype=float),
         pd.Series(adj_p_values, name='BH adj_pvalue', dtype=float),
+        pd.Series(emp_p_values, name='empirical pvalue', dtype=float),
+        pd.Series(emp_fdr_values, name='empirical FDR', dtype=float),
         pd.Series(target_sizes, name='number_of_guide_elements', dtype=int),
     ], axis=1)
 

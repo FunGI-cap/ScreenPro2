@@ -22,7 +22,7 @@ from .delta import (
 )
 from .deseq import runDESeq, extractDESeqResults
 from ._annotate import annotateScoreTable
-from .phenostat import matrixStat, multipleTestsCorrection
+from .phenostat import matrixStat, multipleTestsCorrection, empiricalPValue, empiricalFDR
 
 
 def runPhenoScore(adata, cond_ref, cond_test, score_level, 
