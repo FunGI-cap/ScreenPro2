@@ -66,11 +66,12 @@ def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', te
     adj_p_values = multipleTestsCorrection(p_values)
 
     # compute empirical p-values and FDR using non-targeting control score distribution
-    scores_array = np.array(scores)
-    ctrl_mask = adat.var.targetType.eq(ctrl_label).values
-    null_scores = scores_array[ctrl_mask]
-    emp_p_values = empiricalPValue(scores_array, null_scores)
-    emp_fdr_values = empiricalFDR(scores_array, null_scores)
+    # Build a Series with df_cond_ref.index so that pandas aligns null-score
+    # extraction by index (consistent with x_ctrl extraction above).
+    scores_series = pd.Series(scores, index=df_cond_ref.index)
+    null_scores = scores_series[adat.var.targetType.eq(ctrl_label)].values
+    emp_p_values = empiricalPValue(scores_series.values, null_scores)
+    emp_fdr_values = empiricalFDR(scores_series.values, null_scores)
 
     # get target information            
     targets_df = adat.var[var_names].copy()
