@@ -132,6 +132,7 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
     p_values = []
     target_sizes = []
 
+    #TODO: enable multithreading for this loop to speed up calculation
     # group by target genes or pseudogenes to aggregate counts for score calculation
     for target_name, target_group in adat.var.groupby(var_names):
 

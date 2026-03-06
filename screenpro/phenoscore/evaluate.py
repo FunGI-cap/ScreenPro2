@@ -1,4 +1,4 @@
-## Copyright (c) 2022-2024 ScreenPro2 Development Team.
+## Copyright (c) 2022-2026 ScreenPro2 Development Team.
 ## All rights reserved.
 ## Gilbart Lab, UCSF / Arc Institute.
 ## Multi-Omics Tech Center, Arc Insititue.
@@ -17,13 +17,14 @@ import matplotlib.lines as mlines
 
 def calcROC(df_in, essential, nonessential, score_col, target_col='target', verbose=False):
     df = df_in.copy()
-    df[target_col] = df[target_col].str.split('-').str[0]
     
     # AUC-ROC
-    df['DepMap'] = np.nan
-    df.loc[df[target_col].isin(essential),'DepMap'] = 'essential'
-    df.loc[df[target_col].isin(nonessential),'DepMap'] = 'non_essential'
-    
+    df['DepMap'] = [
+        'essential' if target in essential else 
+        'non_essential' if target in nonessential else 
+        np.nan for target in df[target_col]
+    ]
+
     y_true = df[df['DepMap'].notna()]['DepMap']
     y_scores = df[df['DepMap'].notna()][score_col]
     
