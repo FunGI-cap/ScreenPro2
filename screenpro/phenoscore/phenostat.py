@@ -8,6 +8,8 @@ from statsmodels.stats.multitest import multipletests
 import warnings
 
 
+## Core functions for statistical analysis of phenoscore data
+
 def matrixStat(x, y, test, level, transform='log10'):
     """
     Get p-values comparing `y` vs `x` matrices.
@@ -104,24 +106,6 @@ def matrixStat(x, y, test, level, transform='log10'):
         return p_value
     else:
         raise ValueError(f'Test "{test}" not recognized')
-
-
-def _mannwhitneyu_safe(y, x):
-    """Run Mann-Whitney U test, returning NaN when sample size is insufficient."""
-    y_clean = y[~np.isnan(y)]
-    x_clean = x[~np.isnan(x)]
-    if len(y_clean) < 2 or len(x_clean) < 2:
-        return np.nan
-    return mannwhitneyu(y_clean, x_clean, alternative='two-sided')[1]
-
-
-def _ks_2samp_safe(y, x):
-    """Run Kolmogorov-Smirnov test, returning NaN when sample size is insufficient."""
-    y_clean = y[~np.isnan(y)]
-    x_clean = x[~np.isnan(x)]
-    if len(y_clean) < 2 or len(x_clean) < 2:
-        return np.nan
-    return ks_2samp(y_clean, x_clean)[1]
 
 
 def multipleTestsCorrection(p_values, method='fdr_bh'):
@@ -256,3 +240,24 @@ def empiricalFDR(scores, null_scores, tail='two-sided'):
             fdr_values[i] = 0.0
 
     return fdr_values
+
+
+
+## Utility functions for safe statistical testing with small sample sizes
+
+def _mannwhitneyu_safe(y, x):
+    """Run Mann-Whitney U test, returning NaN when sample size is insufficient."""
+    y_clean = y[~np.isnan(y)]
+    x_clean = x[~np.isnan(x)]
+    if len(y_clean) < 2 or len(x_clean) < 2:
+        return np.nan
+    return mannwhitneyu(y_clean, x_clean, alternative='two-sided')[1]
+
+
+def _ks_2samp_safe(y, x):
+    """Run Kolmogorov-Smirnov test, returning NaN when sample size is insufficient."""
+    y_clean = y[~np.isnan(y)]
+    x_clean = x[~np.isnan(x)]
+    if len(y_clean) < 2 or len(x_clean) < 2:
+        return np.nan
+    return ks_2samp(y_clean, x_clean)[1]
