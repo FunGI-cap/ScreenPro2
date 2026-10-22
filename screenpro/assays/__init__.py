@@ -19,7 +19,7 @@ from ..phenoscore import (
 )
 from ..preprocessing import addPseudoCount, findLowCounts, normalizeSeqDepth
 from ..phenoscore._annotate import annotateScoreTable, hit_dict
-from ..phenoscore.phenostat import validateTest
+from ..phenoscore.phenostat import validateTest, TEST_NAMES
 from ..plotting import volcano_plot, label_resistance_hit, label_sensitivity_hit
 
 import warnings
@@ -115,6 +115,19 @@ class PooledScreens(object):
                 '' + ', '.join(self.phenotypes.keys())
             )
         return run_name
+
+
+    def _resolvePvalueCol(self, run_name, df):
+        """Pick the p-value column for a run: ``'<test> pvalue'`` if the run recorded its
+        test, else plain ``'pvalue'`` (e.g. DESeq2 runs)."""
+        test = self.phenotypes[run_name]['config'].get('test')
+        for col in ([f'{test} pvalue'] if test else []) + ['pvalue']:
+            if col in df.columns:
+                return col
+        raise ValueError(
+            f'No p-value column found for run "{run_name}" (test={test!r}). '
+            f'Pass pvalue_col explicitly. Available columns: {", ".join(map(str, df.columns))}'
+        )
 
     def filterLowCounts(self, filter_type='all', minimum_reads=1):
         """
@@ -398,9 +411,9 @@ class PooledScreens(object):
             dot_size=1,
             run_name='auto',
             score_col='score', 
-            pvalue_col='pvalue',
+            pvalue_col='auto',
             xlabel='auto',
-            ylabel='-log10(pvalue)',
+            ylabel='auto',
             xlims='auto',
             ylims='auto',
             ctrl_label='negative_control',
@@ -414,7 +427,11 @@ class PooledScreens(object):
         
         score_tag, _ = phenotype_name.split(':')
 
-        df = self.phenotypes[run_name]['results'][phenotype_name].dropna()
+        # drop only rows missing a score or p-value; other columns may legitimately be NaN
+        df = self.phenotypes[run_name]['results'][phenotype_name]
+        if pvalue_col == 'auto':
+            pvalue_col = self._resolvePvalueCol(run_name, df)
+        df = df.dropna(subset=[score_col, pvalue_col])
 
         df = annotateScoreTable(
             df, 
@@ -425,16 +442,26 @@ class PooledScreens(object):
             threshold=threshold,
         )
 
-        df['-log10(pvalue)'] = -np.log10(df[pvalue_col])
+        # p = 0 would give an infinite y value and break the axis limits
+        df['-log10(pvalue)'] = -np.log10(df[pvalue_col].clip(lower=np.finfo(float).tiny))
 
         if xlabel == 'auto':
             xlabel = phenotype_name.replace(':', ': ').replace('_', ' ')
+
+        # y label: styled -log10 with the full test name as a small note, when the plotted
+        # p-value column is the one produced by the run's test
+        ylabel_note = None
+        if ylabel == 'auto':
+            ylabel = r'$-\log_{10}$(p-value)'
+            test = self.phenotypes[run_name]['config'].get('test')
+            if test in TEST_NAMES and pvalue_col == f'{test} pvalue':
+                ylabel_note = TEST_NAMES[test]
         
         volcano_plot(ax, df, 
                       up_hit=hit_dict[score_tag]['up_hit'], 
                       down_hit=hit_dict[score_tag]['down_hit'],
                       score_col=score_col, pvalue_col=pvalue_col,
-                      xlabel=xlabel, ylabel=ylabel,
+                      xlabel=xlabel, ylabel=ylabel, ylabel_note=ylabel_note,
                       dot_size=dot_size, xlims=xlims, ylims=ylims,
                       ctrl_label=ctrl_label,
                       **args)

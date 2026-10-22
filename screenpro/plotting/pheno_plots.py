@@ -9,7 +9,8 @@ def volcano_plot(
             ax, df, up_hit, down_hit,
             score_col='score', pvalue_col='pvalue',
             xlabel='phenotype score',
-            ylabel='-log10(pvalue)',
+            ylabel=r'$-\log_{10}$(p-value)',
+            ylabel_note=None,
             dot_size=1,
             xlims='auto',
             ylims='auto',
@@ -20,10 +21,13 @@ def volcano_plot(
         if f'-log10({pvalue_col})' not in df.columns:
             df[f'-log10({pvalue_col})'] = np.log10(df[pvalue_col]) * -1
 
+        # limits come from finite values only (NaN/inf would make the axis limits invalid)
+        x_fin = df[score_col][np.isfinite(df[score_col])]
+        y_fin = df[f'-log10({pvalue_col})'][np.isfinite(df[f'-log10({pvalue_col})'])]
         if xlims == 'auto':
-            xlims = (df[score_col].min() - 0.1, df[score_col].max() + 0.1)
+            xlims = (x_fin.min() - 0.1, x_fin.max() + 0.1)
         if ylims == 'auto':
-            ylims = (df[f'-log10({pvalue_col})'].min() - 0.1, df[f'-log10({pvalue_col})'].max() + 0.1)
+            ylims = (y_fin.min() - 0.1, y_fin.max() + 0.1)
         
         # Scatter plot for each category
         ax.scatter( df.loc[df['label'] == 'target_non_hit', score_col],
@@ -49,6 +53,11 @@ def volcano_plot(
         # Set x-axis and y-axis labels
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
+        if ylabel_note:
+            # smaller second line placed just left of the y label (e.g. the name of the test)
+            ax.annotate(ylabel_note, xy=(0, 0.5), xycoords=ax.yaxis.label,
+                        xytext=(-2, 0), textcoords='offset points',
+                        rotation=90, ha='right', va='center', fontsize=7)
 
         # Set x-axis limits
         ax.set_xlim(xlims)

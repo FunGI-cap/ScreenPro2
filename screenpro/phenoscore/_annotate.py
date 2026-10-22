@@ -51,7 +51,12 @@ def getCombinedScore(df_in, score_col='score', pvalue_col='pvalue', target_col='
             raise ValueError(f'Column "{col}" not found in the input DataFrame.')
     
     # calculate pseudo_sd
-    pseudo_sd = df[df[target_col].eq(ctrl_label)][score_col].tolist()
+    pseudo_sd = df[df[target_col].eq(ctrl_label)][score_col].dropna().tolist()
+    if len(pseudo_sd) < 2:
+        raise ValueError(
+            f'Need at least 2 "{ctrl_label}" rows with a non-missing "{score_col}" to scale '
+            'the combined score; found none usable. Check that control rows were not dropped.'
+        )
     pseudo_sd = np.std(pseudo_sd)
 
     # calculate combined score

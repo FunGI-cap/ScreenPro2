@@ -25,6 +25,15 @@ TESTS = {
 }
 
 
+# canonical name -> full name for plot labels and reports
+TEST_NAMES = {
+    'modT': 'moderated t-test',
+    'MW': 'Mann\u2013Whitney U test',
+    'KS': 'Kolmogorov\u2013Smirnov test',
+    'ttest': 'paired t-test (legacy)',
+}
+
+
 def validateTest(test):
     """Check a user-supplied ``test`` name and return its canonical form.
 
@@ -49,7 +58,7 @@ def validateTest(test):
     problem = '`test` is required.' if test is None else f'Test {test!r} not recognized.'
     raise ValueError(
         f"{problem} Choose the test that matches your question:\n{options}\n"
-        "Empirical p-values and FDR against non-targeting controls are always reported."
+        "BH-adjusted p-values are reported alongside the raw p-values."
     )
 
 
@@ -344,138 +353,22 @@ def controlStat(scores, null_scores, test='MW'):
     raise ValueError(f'Test "{test}" not supported for control comparison')
 
 
-def _nullTailFraction(values, null_sorted, side):
-    """Number of null scores at least as extreme as each value, in direction ``side``.
-
-    ``side='less'`` counts null <= value and ``side='greater'`` counts null >= value.
-    """
-    if side == 'less':
-        return np.searchsorted(null_sorted, values, side='right')
-    return len(null_sorted) - np.searchsorted(null_sorted, values, side='left')
-
-
 def empiricalPValue(scores, null_scores, tail='two-sided'):
-    """Calculate empirical p-values by comparing scores to a null distribution.
+    """Empirical p-values against a null distribution of non-targeting control scores.
 
-    The null distribution is the scores of non-targeting controls (or pseudogenes
-    built from them), computed with the *same* procedure as the scores being tested
-    (same replicate averaging, same number of guides, same top-n selection). For each
-    score the one-sided empirical p-value is the fraction of null scores at least as
-    extreme in that direction, with a pseudocount of 1 in numerator and denominator
-    so p is never 0 (smallest value is ``1 / (n_null + 1)``).
-
-    For ``tail='two-sided'`` the p-value is ``2 * min(p_less, p_greater)`` capped
-    at 1. Unlike comparing ``|null| >= |score|``, this does not assume the null is
-    symmetric around zero, which matters when controls are skewed or off-centre.
-
-    Parameters:
-        scores (array-like): observed phenotype scores
-        null_scores (array-like): null/non-targeting control scores
-        tail (str): 'two-sided' (default), 'less', or 'greater'
-
-    Returns:
-        np.array: array of empirical p-values in [0, 1]
+    TODO: design pending. Open points before implementing: size-matched null for targets
+    with different guide counts, overlapping pseudogenes, seeding, and how a two-sided
+    value should treat an asymmetric null.
     """
-    if tail not in ('two-sided', 'less', 'greater'):
-        raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
-
-    scores = np.asarray(scores, dtype=float)
-    null_scores = np.asarray(null_scores, dtype=float)
-    null_sorted = np.sort(null_scores[~np.isnan(null_scores)])
-    n_null = len(null_sorted)
-
-    if n_null == 0:
-        return np.full(len(scores), np.nan)
-
-    p_values = np.full(len(scores), np.nan)
-    ok = ~np.isnan(scores)
-    p_less = (_nullTailFraction(scores[ok], null_sorted, 'less') + 1) / (n_null + 1)
-    p_greater = (_nullTailFraction(scores[ok], null_sorted, 'greater') + 1) / (n_null + 1)
-
-    if tail == 'less':
-        p_values[ok] = p_less
-    elif tail == 'greater':
-        p_values[ok] = p_greater
-    else:
-        p_values[ok] = np.minimum(2 * np.minimum(p_less, p_greater), 1.0)
-
-    return p_values
+    pass
 
 
-def empiricalFDR(scores, null_scores, tail='two-sided', is_null=None):
-    """Calculate empirical FDR (q-value) by comparing scores to a null distribution.
+def empiricalFDR(scores, null_scores, tail='two-sided'):
+    """Empirical FDR (q-value) against a null distribution of non-targeting control scores.
 
-    For a threshold at score ``s``:
-
-    .. math::
-
-        \\text{FDR}(s) = \\frac{\\text{expected false positives}}{\\text{observed positives}}
-
-    where *expected false positives* = ``(# null at least as extreme as s) / n_null * n_tested``
-    and *observed positives* = ``# tested scores at least as extreme as s``.
-
-    Details that matter:
-
-    - ``is_null`` marks entries of ``scores`` that are themselves controls or
-      pseudogenes. They are excluded from the tested set (``n_tested`` and the
-      observed positives), otherwise null entries dilute the estimate towards 1.
-      FDR is reported only for tested entries; null entries get NaN.
-    - ``tail='two-sided'`` is evaluated per direction (negative scores against the
-      lower tail of the null, positive against the upper tail), so an off-centre or
-      skewed null does not mix depleted and enriched hits.
-    - The result is made monotone (a q-value): an entry's FDR is the smallest FDR
-      over all thresholds at least as lenient as its own score.
-    - ``pi0`` (fraction of truly null tested entries) is taken as 1, which is conservative.
-
-    Parameters:
-        scores (array-like): observed phenotype scores
-        null_scores (array-like): null/non-targeting control scores
-        tail (str): 'two-sided' (default), 'less', or 'greater'
-        is_null (array-like of bool, optional): which entries of ``scores`` are null items
-
-    Returns:
-        np.array: array of empirical FDR values in [0, 1]; NaN for null or missing scores
+    TODO: design pending; see :func:`empiricalPValue`.
     """
-    if tail not in ('two-sided', 'less', 'greater'):
-        raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
-
-    scores = np.asarray(scores, dtype=float)
-    null_scores = np.asarray(null_scores, dtype=float)
-    null_sorted = np.sort(null_scores[~np.isnan(null_scores)])
-    n_null = len(null_sorted)
-
-    is_null = np.zeros(len(scores), dtype=bool) if is_null is None else np.asarray(is_null, dtype=bool)
-    tested = ~np.isnan(scores) & ~is_null
-    n_tested = int(tested.sum())
-
-    fdr_values = np.full(len(scores), np.nan)
-    if n_null == 0 or n_tested == 0:
-        return fdr_values
-
-    tested_sorted = np.sort(scores[tested])
-    sides = {'less': ['less'], 'greater': ['greater'], 'two-sided': ['less', 'greater']}[tail]
-
-    for side in sides:
-        if tail == 'two-sided':
-            mask = tested & ((scores < 0) if side == 'less' else (scores >= 0))
-        else:
-            mask = tested
-        idx = np.where(mask)[0]
-        if len(idx) == 0:
-            continue
-
-        vals = scores[idx]
-        expected_fp = _nullTailFraction(vals, null_sorted, side) / n_null * n_tested
-        observed = _nullTailFraction(vals, tested_sorted, side)  # >= 1: each score counts itself
-        fdr = np.minimum(expected_fp / observed, 1.0)
-
-        # q-value: minimum over all thresholds at least as lenient (less extreme)
-        order = np.argsort(np.abs(vals), kind='stable')
-        q = np.empty_like(fdr)
-        q[order] = np.minimum.accumulate(fdr[order])
-        fdr_values[idx] = q
-
-    return fdr_values
+    pass
 
 
 

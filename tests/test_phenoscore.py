@@ -4,7 +4,7 @@ import anndata as ad
 import pandas as pd
 import pytest
 from screenpro.phenoscore import runPhenoScore
-from screenpro.phenoscore.phenostat import matrixStat, controlStat, multipleTestsCorrection, empiricalPValue, empiricalFDR
+from screenpro.phenoscore.phenostat import matrixStat, controlStat, multipleTestsCorrection
 
 
 def _make_test_matrices():
@@ -179,145 +179,7 @@ def test_runPhenoScore():
     # check result dataframe
     assert isinstance(result, pd.DataFrame)
 
-# ── empiricalPValue tests ──────────────────────────────────────────────────────
-
-def _make_score_arrays(seed=0):
-    rng = np.random.default_rng(seed)
-    scores = rng.standard_normal(20)
-    null_scores = rng.standard_normal(100)
-    return scores, null_scores
-
-
-def test_empiricalPValue_two_sided_range():
-    scores, null_scores = _make_score_arrays()
-    p = empiricalPValue(scores, null_scores, tail='two-sided')
-    assert p.shape == (len(scores),)
-    assert np.all((p > 0) & (p <= 1))
-
-
-def test_empiricalPValue_less_range():
-    scores, null_scores = _make_score_arrays()
-    p = empiricalPValue(scores, null_scores, tail='less')
-    assert np.all((p > 0) & (p <= 1))
-
-
-def test_empiricalPValue_greater_range():
-    scores, null_scores = _make_score_arrays()
-    p = empiricalPValue(scores, null_scores, tail='greater')
-    assert np.all((p > 0) & (p <= 1))
-
-
-def test_empiricalPValue_nan_input():
-    scores = np.array([1.0, np.nan, -1.0])
-    null_scores = np.array([0.5, -0.5, 0.0])
-    p = empiricalPValue(scores, null_scores)
-    assert np.isnan(p[1])
-    assert not np.isnan(p[0])
-    assert not np.isnan(p[2])
-
-
-def test_empiricalPValue_empty_null():
-    scores = np.array([1.0, 2.0])
-    null_scores = np.array([])
-    p = empiricalPValue(scores, null_scores)
-    assert np.all(np.isnan(p))
-
-
-def test_empiricalPValue_invalid_tail():
-    scores, null_scores = _make_score_arrays()
-    with pytest.raises(ValueError, match='not recognized'):
-        empiricalPValue(scores, null_scores, tail='invalid')
-
-
-def test_empiricalPValue_extreme_score_low_pvalue():
-    """A score far from the null distribution should have a small p-value."""
-    null_scores = np.zeros(1000)
-    extreme_score = np.array([100.0])
-    p = empiricalPValue(extreme_score, null_scores, tail='two-sided')
-    assert p[0] < 0.01
-
-
-# ── empiricalFDR tests ─────────────────────────────────────────────────────────
-
-def test_empiricalFDR_range():
-    scores, null_scores = _make_score_arrays()
-    fdr = empiricalFDR(scores, null_scores, tail='two-sided')
-    assert fdr.shape == (len(scores),)
-    assert np.all(((fdr >= 0) & (fdr <= 1)) | np.isnan(fdr))
-
-
-def test_empiricalFDR_nan_input():
-    scores = np.array([1.0, np.nan, -1.0])
-    null_scores = np.array([0.5, -0.5, 0.0])
-    fdr = empiricalFDR(scores, null_scores)
-    assert np.isnan(fdr[1])
-    assert not np.isnan(fdr[0])
-    assert not np.isnan(fdr[2])
-
-
-def test_empiricalFDR_empty_null():
-    scores = np.array([1.0, 2.0])
-    null_scores = np.array([])
-    fdr = empiricalFDR(scores, null_scores)
-    assert np.all(np.isnan(fdr))
-
-
-def test_empiricalFDR_invalid_tail():
-    scores, null_scores = _make_score_arrays()
-    with pytest.raises(ValueError, match='not recognized'):
-        empiricalFDR(scores, null_scores, tail='invalid')
-
-
-def test_empiricalFDR_extreme_score_low_fdr():
-    """Scores far from the null distribution should yield low FDR."""
-    rng = np.random.default_rng(42)
-    null_scores = rng.standard_normal(1000)
-    scores = np.array([10.0, 11.0, 12.0])
-    fdr = empiricalFDR(scores, null_scores, tail='two-sided')
-    assert np.all(fdr < 0.05)
-
-
 # ── runPhenoScore new columns ──────────────────────────────────────────────────
-
-def test_runPhenoScore_has_empirical_columns():
-    """Verify runPhenoScore result includes empirical pvalue and FDR columns."""
-    rng = np.random.default_rng(7)
-    cond_A = rng.integers(10, 30, size=(3, 10))
-    cond_B = rng.integers(50, 100, size=(3, 10))
-
-    adat = ad.AnnData(
-        X=np.concatenate([cond_A, cond_B], axis=0).astype(float),
-        obs=pd.DataFrame(
-            {'condition': ['A'] * 3 + ['B'] * 3},
-            index=pd.Index(['sample_' + str(i) for i in range(6)], name='sample')
-        ),
-        var=pd.DataFrame(
-            {
-                'target': ['targetID_' + str(i) for i in range(10)],
-                'targetType': ['gene'] * 8 + ['negative_control'] * 2
-            },
-            index=pd.Index(['targetID_' + str(i) for i in range(10)], name='target')
-        )
-    )
-
-    _, result = runPhenoScore(
-        adata=adat,
-        cond_ref='A',
-        cond_test='B',
-        test='ttest',
-        score_level='compare_reps',
-        growth_rate=1,
-        n_reps=3,
-        ctrl_label='negative_control'
-    )
-
-    assert 'empirical pvalue' in result.columns
-    assert 'empirical FDR' in result.columns
-    emp_p = result['empirical pvalue'].dropna()
-    emp_fdr = result['empirical FDR'].dropna()
-    assert np.all((emp_p > 0) & (emp_p <= 1))
-    assert np.all((emp_fdr >= 0) & (emp_fdr <= 1))
-
 
 def test_matrixStat_MW_exact_floor_warns():
     """3 vs 3 replicates: smallest two-sided exact MW p-value is 0.1."""
@@ -424,36 +286,6 @@ def test_runPhenoScore_modT(level):
     assert len(hits) >= 3 and (hits[col] < 0.01).all()
 
 
-def test_empiricalPValue_two_sided_matches_one_sided_on_skewed_null():
-    rng = np.random.default_rng(0)
-    null = rng.gamma(2, 0.15, 2000) - 0.3
-    scores = np.array([-0.25, 0.0, 0.8])
-    p2 = empiricalPValue(scores, null, 'two-sided')
-    lo = empiricalPValue(scores, null, 'less'); hi = empiricalPValue(scores, null, 'greater')
-    np.testing.assert_allclose(p2, np.minimum(2 * np.minimum(lo, hi), 1))
-
-
-def test_empiricalPValue_calibrated_under_null():
-    rng = np.random.default_rng(1)
-    null = rng.normal(0, 1, 5000)
-    p = empiricalPValue(rng.normal(0, 1, 20000), null)
-    assert np.mean(p < 0.05) == pytest.approx(0.05, abs=0.008)
-
-
-def test_empiricalFDR_excludes_null_from_tested_set_and_is_monotone():
-    rng = np.random.default_rng(2)
-    null = rng.normal(0, 1, 2000)
-    genes = np.r_[rng.normal(0, 1, 800), rng.normal(-4, 0.5, 100)]
-    scores = np.r_[genes, rng.normal(0, 1, 500)]
-    is_null = np.r_[np.zeros(len(genes), bool), np.ones(500, bool)]
-    fdr = empiricalFDR(scores, null, is_null=is_null)
-    assert np.isnan(fdr[is_null]).all() and not np.isnan(fdr[~is_null]).any()
-    g = fdr[~is_null]; s = genes
-    assert np.all(np.diff(g[s < 0][np.argsort(np.abs(s[s < 0]))]) <= 1e-12)   # more extreme -> lower q
-    assert np.median(g[800:]) < 0.01          # the 100 strong hits are called
-    assert np.mean(g[:800] < 0.05) < 0.1      # nulls rarely are
-
-
 def test_validateTest_required_and_canonical():
     from screenpro.phenoscore.phenostat import validateTest, TESTS
     with pytest.raises(ValueError, match=r"(?s)`test` is required.*modT.*MW.*ttest") as e:
@@ -478,3 +310,57 @@ def test_runPhenoScore_and_PooledScreens_require_test():
     with pytest.raises(ValueError, match="`test` is required"):
         PooledScreens(adat)
     assert PooledScreens(adat, test='limma').test == 'modT'
+
+
+def test_drawVolcano_keeps_controls_and_colors_hits_despite_nan_in_other_columns():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from screenpro.assays import PooledScreens
+    rng = np.random.default_rng(0)
+    n = 300
+    df = pd.DataFrame({
+        'target': [f'g{i}' for i in range(n - 100)] + ['negative_control'] * 100,
+        'score': rng.normal(0, 0.2, n),
+        'pvalue': rng.uniform(0.01, 1, n),
+        'other': np.where(np.arange(n) >= n - 100, np.nan, 1.0),   # NaN on every control row
+    })
+    df.loc[0, ['score', 'pvalue']] = [-3.0, 0.0]                  # strong hit with p == 0
+    df.loc[1, 'score'] = np.nan                                    # untestable row
+    screen = PooledScreens(ad.AnnData(X=np.ones((2, 2)), obs=pd.DataFrame(index=['a', 'b'])), test='modT')
+    screen.phenotypes['r'] = {'config': {}, 'results': {'rho:B_vs_A': df}}
+    fig, ax = plt.subplots()
+    screen.drawVolcano(ax, 'rho:B_vs_A', threshold=5, run_name='r')
+    counts = {h.get_label(): len(h.get_offsets()) for h in ax.collections}
+    assert counts['negative_control'] == 100
+    assert counts['sensitivity_hit'] >= 1
+    assert all(np.isfinite(ax.get_ylim()))
+    plt.close(fig)
+
+
+def test_drawVolcano_auto_pvalue_col_follows_run_test():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from screenpro.assays import PooledScreens
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({
+        'target': [f'g{i}' for i in range(50)] + ['negative_control'] * 50,
+        'score': rng.normal(0, 0.2, 100),
+        'modT pvalue': rng.uniform(0.01, 1, 100),
+    })
+    screen = PooledScreens(ad.AnnData(X=np.ones((2, 2)), obs=pd.DataFrame(index=['a', 'b'])), test='modT')
+    screen.phenotypes['r'] = {'config': {'test': 'modT'}, 'results': {'rho:B_vs_A': df}}
+    fig, ax = plt.subplots()
+    screen.drawVolcano(ax, 'rho:B_vs_A', threshold=5, run_name='r')       # no pvalue_col given
+    assert 'log' in ax.get_ylabel() and '10' in ax.get_ylabel()
+    assert 'moderated t-test' in [t.get_text() for t in ax.texts]          # full name, not 'modT'
+    plt.close(fig)
+
+    screen.phenotypes['r']['config'] = {'test': 'MW'}                       # column for MW is absent
+    with pytest.raises(ValueError, match='No p-value column found'):
+        screen.drawVolcano(plt.subplots()[1], 'rho:B_vs_A', threshold=5, run_name='r')
+
+    df2 = df.rename(columns={'modT pvalue': 'pvalue'})                      # e.g. DESeq2 run, no test recorded
+    screen.phenotypes['r'] = {'config': {}, 'results': {'rho:B_vs_A': df2}}
+    screen.drawVolcano(plt.subplots()[1], 'rho:B_vs_A', threshold=5, run_name='r')
