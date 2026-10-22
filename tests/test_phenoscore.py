@@ -364,3 +364,30 @@ def test_drawVolcano_auto_pvalue_col_follows_run_test():
     df2 = df.rename(columns={'modT pvalue': 'pvalue'})                      # e.g. DESeq2 run, no test recorded
     screen.phenotypes['r'] = {'config': {}, 'results': {'rho:B_vs_A': df2}}
     screen.drawVolcano(plt.subplots()[1], 'rho:B_vs_A', threshold=5, run_name='r')
+
+
+def test_drawVolcano_labels_only_significant_hits_and_warns():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from screenpro.assays import PooledScreens
+    rng = np.random.default_rng(0)
+    n = 200
+    df = pd.DataFrame({
+        'target': [f'g{i}' for i in range(n - 100)] + ['negative_control'] * 100,
+        'score': rng.normal(0, 0.2, n),
+        'pvalue': rng.uniform(0.01, 1, n),
+    })
+    df.loc[0, ['target', 'score', 'pvalue']] = ['multi', -3.0, 1e-12]   # significant
+    df.loc[1, ['target', 'score', 'pvalue']] = ['multi', 0.0, 0.9]      # not significant
+    screen = PooledScreens(ad.AnnData(X=np.ones((2, 2)), obs=pd.DataFrame(index=['a', 'b'])), test='modT')
+    screen.phenotypes['r'] = {'config': {}, 'results': {'rho:B_vs_A': df}}
+    fig, ax = plt.subplots()
+    with pytest.warns(UserWarning) as rec:
+        screen.drawVolcano(ax, 'rho:B_vs_A', threshold=5, run_name='r',
+                           sensitivity_hits=['multi', 'g5'], resistance_hits='multi')
+    msgs = [str(w.message) for w in rec]
+    assert any('"multi" has 2 entries' in m and 'skipped 1' in m for m in msgs)
+    assert any('"g5" is not significant' in m for m in msgs)
+    assert any('"multi" is not significant' in m for m in msgs)   # no resistance entry
+    plt.close(fig)

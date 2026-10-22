@@ -466,29 +466,42 @@ class PooledScreens(object):
                       ctrl_label=ctrl_label,
                       **args)
         
-        if resistance_hits != None:
-            if type(resistance_hits) != list: resistance_hits = [resistance_hits]
-            for hit in resistance_hits:
-                label_resistance_hit(
-                    ax=ax, df_in=df, label=hit,
+        for hits, hit_label, label_fn in [
+            (resistance_hits, hit_dict[score_tag]['up_hit'], label_resistance_hit),
+            (sensitivity_hits, hit_dict[score_tag]['down_hit'], label_sensitivity_hit),
+        ]:
+            if hits is None: continue
+            if not isinstance(hits, (list, tuple, set)): hits = [hits]
+            for hit in hits:
+                sig_df = self._significantTargetRows(df, hit, hit_label)
+                if sig_df is None: continue
+                label_fn(
+                    ax=ax, df_in=sig_df, label=hit,
                     x_col=score_col,
                     y_col='-log10(pvalue)',
                     size=dot_size * 2,
                     size_txt=size_txt,
                     t_x=t_x, t_y=t_y
                 )
-        
-        if sensitivity_hits != None:
-            if type(sensitivity_hits) != list: sensitivity_hits = [sensitivity_hits]
-            for hit in sensitivity_hits:
-                label_sensitivity_hit(
-                    ax=ax, df_in=df, label=hit,
-                    x_col=score_col,
-                    y_col='-log10(pvalue)',
-                    size=dot_size * 2,
-                    size_txt=size_txt,
-                    t_x=t_x, t_y=t_y
-            )
+
+    @staticmethod
+    def _significantTargetRows(df, target, hit_label):
+        """Rows of `target` annotated as `hit_label`; warns about non-significant input
+        genes and about skipped non-significant entries of multi-target genes."""
+        rows = df[df['target'] == target]
+        if len(rows) == 0:
+            warnings.warn(f'"{target}" not found in the results; it will not be labeled.')
+            return None
+        is_sig = rows['label'].astype(str) == hit_label
+        n_skipped = int((~is_sig).sum())
+        if not is_sig.any():
+            warnings.warn(f'"{target}" is not significant ({hit_label} not met); it will not be labeled.')
+            return None
+        if n_skipped:
+            warnings.warn(
+                f'"{target}" has {len(rows)} entries in the library; skipped {n_skipped} '
+                f'that are not significant, labeling the other {int(is_sig.sum())}.')
+        return df.loc[rows.index[is_sig.values]]
 
 
 class GImaps(object):
