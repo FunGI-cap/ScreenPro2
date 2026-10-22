@@ -312,11 +312,14 @@ def test_runPhenoScore_and_PooledScreens_require_test():
     assert PooledScreens(adat, test='limma').test == 'modT'
 
 
-def test_drawVolcano_keeps_controls_and_colors_hits_despite_nan_in_other_columns():
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
+def _volcano_screen(df, config=None):
     from screenpro.assays import PooledScreens
+    screen = PooledScreens(ad.AnnData(X=np.ones((2, 2)), obs=pd.DataFrame(index=['a', 'b'])), test='modT')
+    screen.phenotypes['r'] = {'config': config or {}, 'results': {'rho:B_vs_A': df}}
+    return screen
+
+
+def test_drawVolcano_keeps_controls_and_colors_hits_despite_nan_in_other_columns():
     rng = np.random.default_rng(0)
     n = 300
     df = pd.DataFrame({
@@ -327,50 +330,36 @@ def test_drawVolcano_keeps_controls_and_colors_hits_despite_nan_in_other_columns
     })
     df.loc[0, ['score', 'pvalue']] = [-3.0, 0.0]                  # strong hit with p == 0
     df.loc[1, 'score'] = np.nan                                    # untestable row
-    screen = PooledScreens(ad.AnnData(X=np.ones((2, 2)), obs=pd.DataFrame(index=['a', 'b'])), test='modT')
-    screen.phenotypes['r'] = {'config': {}, 'results': {'rho:B_vs_A': df}}
-    fig, ax = plt.subplots()
-    screen.drawVolcano(ax, 'rho:B_vs_A', threshold=5, run_name='r')
-    counts = {h.get_label(): len(h.get_offsets()) for h in ax.collections}
+    plot = _volcano_screen(df).drawVolcano('rho:B_vs_A', threshold=5, run_name='r')
+    data = plot.data
+    counts = data['label'].value_counts()
     assert counts['negative_control'] == 100
     assert counts['sensitivity_hit'] >= 1
-    assert all(np.isfinite(ax.get_ylim()))
-    plt.close(fig)
+    assert np.isfinite(data['-log10(pvalue)']).all()
+    plot.draw()   # renders without error
 
 
 def test_drawVolcano_auto_pvalue_col_follows_run_test():
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from screenpro.assays import PooledScreens
     rng = np.random.default_rng(0)
     df = pd.DataFrame({
         'target': [f'g{i}' for i in range(50)] + ['negative_control'] * 50,
         'score': rng.normal(0, 0.2, 100),
         'modT pvalue': rng.uniform(0.01, 1, 100),
     })
-    screen = PooledScreens(ad.AnnData(X=np.ones((2, 2)), obs=pd.DataFrame(index=['a', 'b'])), test='modT')
-    screen.phenotypes['r'] = {'config': {'test': 'modT'}, 'results': {'rho:B_vs_A': df}}
-    fig, ax = plt.subplots()
-    screen.drawVolcano(ax, 'rho:B_vs_A', threshold=5, run_name='r')       # no pvalue_col given
-    assert 'log' in ax.get_ylabel() and '10' in ax.get_ylabel()
-    assert 'moderated t-test' in [t.get_text() for t in ax.texts]          # full name, not 'modT'
-    plt.close(fig)
+    screen = _volcano_screen(df, {'test': 'modT'})
+    plot = screen.drawVolcano('rho:B_vs_A', threshold=5, run_name='r')    # no pvalue_col given
+    ylab = plot.labels.y
+    assert '10' in ylab and 'moderated t-test' in ylab                     # full name, not 'modT'
 
     screen.phenotypes['r']['config'] = {'test': 'MW'}                       # column for MW is absent
     with pytest.raises(ValueError, match='No p-value column found'):
-        screen.drawVolcano(plt.subplots()[1], 'rho:B_vs_A', threshold=5, run_name='r')
+        screen.drawVolcano('rho:B_vs_A', threshold=5, run_name='r')
 
     df2 = df.rename(columns={'modT pvalue': 'pvalue'})                      # e.g. DESeq2 run, no test recorded
-    screen.phenotypes['r'] = {'config': {}, 'results': {'rho:B_vs_A': df2}}
-    screen.drawVolcano(plt.subplots()[1], 'rho:B_vs_A', threshold=5, run_name='r')
+    _volcano_screen(df2).drawVolcano('rho:B_vs_A', threshold=5, run_name='r')
 
 
 def test_drawVolcano_labels_only_significant_hits_and_warns():
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from screenpro.assays import PooledScreens
     rng = np.random.default_rng(0)
     n = 200
     df = pd.DataFrame({
@@ -380,14 +369,12 @@ def test_drawVolcano_labels_only_significant_hits_and_warns():
     })
     df.loc[0, ['target', 'score', 'pvalue']] = ['multi', -3.0, 1e-12]   # significant
     df.loc[1, ['target', 'score', 'pvalue']] = ['multi', 0.0, 0.9]      # not significant
-    screen = PooledScreens(ad.AnnData(X=np.ones((2, 2)), obs=pd.DataFrame(index=['a', 'b'])), test='modT')
-    screen.phenotypes['r'] = {'config': {}, 'results': {'rho:B_vs_A': df}}
-    fig, ax = plt.subplots()
     with pytest.warns(UserWarning) as rec:
-        screen.drawVolcano(ax, 'rho:B_vs_A', threshold=5, run_name='r',
-                           sensitivity_hits=['multi', 'g5'], resistance_hits='multi')
+        plot = _volcano_screen(df).drawVolcano(
+            'rho:B_vs_A', threshold=5, run_name='r',
+            sensitivity_hits=['multi', 'g5'], resistance_hits='multi', size_txt=8)
     msgs = [str(w.message) for w in rec]
     assert any('"multi" has 2 entries' in m and 'skipped 1' in m for m in msgs)
     assert any('"g5" is not significant' in m for m in msgs)
     assert any('"multi" is not significant' in m for m in msgs)   # no resistance entry
-    plt.close(fig)
+    plot.draw()

@@ -1,12 +1,11 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from ._utils import yellow_blue
-from ._rank import rank_plot
+import plotnine as p9
+import warnings
 
 
 def volcano_plot(
-            ax, df, up_hit, down_hit,
+            df, up_hit, down_hit,
             score_col='score', pvalue_col='pvalue',
             xlabel='phenotype score',
             ylabel=r'$-\log_{10}$(p-value)',
@@ -15,134 +14,98 @@ def volcano_plot(
             xlims='auto',
             ylims='auto',
             ctrl_label='negative_control',
-            **args
+            resistance_hits=None,
+            sensitivity_hits=None,
+            size_txt=None,
+            t_x=0, t_y=0,
+            figure_size=(5, 5),
             ):
-        
-        if f'-log10({pvalue_col})' not in df.columns:
-            df[f'-log10({pvalue_col})'] = np.log10(df[pvalue_col]) * -1
+    """Draw a volcano plot with plotnine and return the `ggplot` object.
 
-        # limits come from finite values only (NaN/inf would make the axis limits invalid)
-        x_fin = df[score_col][np.isfinite(df[score_col])]
-        y_fin = df[f'-log10({pvalue_col})'][np.isfinite(df[f'-log10({pvalue_col})'])]
-        if xlims == 'auto':
-            xlims = (x_fin.min() - 0.1, x_fin.max() + 0.1)
-        if ylims == 'auto':
-            ylims = (y_fin.min() - 0.1, y_fin.max() + 0.1)
-        
-        # Scatter plot for each category
-        ax.scatter( df.loc[df['label'] == 'target_non_hit', score_col],
-                    df.loc[df['label'] == 'target_non_hit', f'-log10({pvalue_col})'],
-                    alpha=0.1, s=dot_size, c='black', label='target_non_hit',
-                    **args)
-        
-        ax.scatter( df.loc[df['label'] == up_hit, score_col], 
-                    df.loc[df['label'] == up_hit, f'-log10({pvalue_col})'],
-                    alpha=0.9, s=dot_size, c='#fcae91', label=up_hit,
-                    **args)
-        
-        ax.scatter( df.loc[df['label'] == down_hit, score_col], 
-                    df.loc[df['label'] == down_hit, f'-log10({pvalue_col})'],
-                    alpha=0.9, s=dot_size, c='#bdd7e7', label=down_hit,
-                    **args)
-        
-        ax.scatter( df.loc[df['label'] == ctrl_label, score_col],
-                    df.loc[df['label'] == ctrl_label, f'-log10({pvalue_col})'],
-                    alpha=0.1, s=dot_size, c='gray', label=ctrl_label,
-                    **args)
+    `df` must have a `label` column (see `annotateScoreTable`). `resistance_hits` and
+    `sensitivity_hits` are lists of targets to highlight (red / blue) and, if `size_txt`
+    is set, to name with repelled text labels.
+    """
 
-        # Set x-axis and y-axis labels
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        if ylabel_note:
-            # smaller second line placed just left of the y label (e.g. the name of the test)
-            ax.annotate(ylabel_note, xy=(0, 0.5), xycoords=ax.yaxis.label,
-                        xytext=(-2, 0), textcoords='offset points',
-                        rotation=90, ha='right', va='center', fontsize=7)
+    df = df.copy()
+    y_col = f'-log10({pvalue_col})'
+    if y_col not in df.columns:
+        df[y_col] = -np.log10(df[pvalue_col])
 
-        # Set x-axis limits
-        ax.set_xlim(xlims)
+    # limits come from finite values only (NaN/inf would make the axis limits invalid)
+    x_fin = df[score_col][np.isfinite(df[score_col])]
+    y_fin = df[y_col][np.isfinite(df[y_col])]
+    if xlims == 'auto':
+        xlims = (x_fin.min() - 0.1, x_fin.max() + 0.1)
+    if ylims == 'auto':
+        ylims = (y_fin.min() - 0.1, y_fin.max() + 0.1)
 
-        # Set y-axis limits
-        ax.set_ylim(ylims)
+    colors = {
+        'target_non_hit': 'black', up_hit: '#fcae91', down_hit: '#bdd7e7', ctrl_label: 'gray',
+    }
+    alphas = {'target_non_hit': 0.1, up_hit: 0.9, down_hit: 0.9, ctrl_label: 0.1}
+    df['label'] = df['label'].astype(str)
+    df = df[df['label'].isin(colors)]
+    df['_alpha'] = df['label'].map(alphas)
 
-        # Add legend
-        ax.legend()
+    if ylabel_note:
+        ylabel = f'{ylabel}\n({ylabel_note})'
 
-
-def label_by_color(ax, df_in, label,
-                   x_col, y_col,
-                   size=2, size_txt="auto",
-                   edgecolors='black', facecolors='black',
-                   textcolor='black',
-                   t_x=.5, t_y=-0.1, **args):
-
-    if size_txt == 'auto': size_txt = size * 2
-
-    df = df_in.copy()
-    target_data = df[df['target'] == label]
-
-    # Scatter plot for labeled data
-    ax.scatter(
-        target_data[x_col], target_data[y_col],
-        s=size, linewidth=0.5, 
-        edgecolors=edgecolors, 
-        facecolors=facecolors, label='target',
-        **args
+    mapping = p9.aes(x=score_col, y=y_col)
+    plot = (
+        p9.ggplot(df, mapping)
+        + p9.geom_point(p9.aes(color='label', alpha='_alpha'), size=dot_size, shape='o')
+        + p9.scale_color_manual(values=colors, breaks=list(colors))
+        + p9.scale_alpha_identity()
+        + p9.coord_cartesian(xlim=xlims, ylim=ylims)
+        + p9.labs(x=xlabel, y=ylabel, color='')
+        + p9.theme_classic()
+        + p9.theme(figure_size=figure_size)
     )
 
-    if size_txt == None:
-        pass
-    else:
-        # Annotate the points
-        for i, _ in enumerate(target_data['target']):
-            txt = target_data['target'].iloc[i]
-            ax.annotate(txt, (target_data[x_col].iloc[i] + t_x, target_data[y_col].iloc[i] + t_y),
-                        color=textcolor, size=size_txt)
+    label_frames = []
+    for hits, hit_label, color in [
+        (resistance_hits, up_hit, '#de2d26'),
+        (sensitivity_hits, down_hit, '#3182bd'),
+    ]:
+        sub = _significant_target_rows(df, hits, hit_label)
+        if sub is None: continue
+        plot += p9.geom_point(sub, mapping, size=dot_size * 2, shape='o', color=color, alpha=1)
+        label_frames.append(sub)
+
+    if size_txt is not None and label_frames:
+        txt = pd.concat(label_frames)
+        plot += p9.geom_text(
+            txt, p9.aes(label='target'), size=size_txt, color='black',
+            nudge_x=t_x, nudge_y=t_y,
+            adjust_text={'arrowprops': {'arrowstyle': '-', 'color': 'black', 'alpha': 0.2}},
+        )
+
+    return plot
 
 
-def label_as_black(ax, df_in, label, 
-                    x_col='score', y_col='-log10(pvalue)',
-                    size=2, size_txt="auto",
-                    t_x=.5, t_y=-0.1,
-                    **args):
-    label_by_color(
-        ax, df_in, label, 
-        x_col=x_col, y_col=y_col,
-        size=size, size_txt=size_txt,
-        edgecolors='black', facecolors='black',
-        textcolor='black',
-        t_x=t_x, t_y=t_y,
-        **args)
-
-
-def label_sensitivity_hit(ax, df_in, label, 
-                            x_col='score', y_col='-log10(pvalue)',
-                            size=2, size_txt="auto",
-                            t_x=.5, t_y=-0.1,
-                            **args):
-    label_by_color(
-        ax, df_in, label, 
-        x_col=x_col, y_col=y_col,
-        size=size, size_txt=size_txt,
-        edgecolors='black', facecolors='#3182bd',
-        textcolor='black',
-        t_x=t_x, t_y=t_y,
-        **args)
-
-
-def label_resistance_hit(ax, df_in, label, 
-                            x_col='score', y_col='-log10(pvalue)',
-                            size=2, size_txt="auto",
-                            t_x=.5, t_y=-0.1,
-                            **args):
-    label_by_color(
-        ax, df_in, label, 
-        x_col=x_col, y_col=y_col,
-        size=size, size_txt=size_txt,
-        edgecolors='black', facecolors='#de2d26',
-        textcolor='black',
-        t_x=t_x, t_y=t_y,
-        **args)
+def _significant_target_rows(df, targets, hit_label):
+    """Rows of `targets` annotated as `hit_label`; warns about missing / non-significant
+    targets and about skipped non-significant entries of multi-target genes."""
+    if targets is None: return None
+    if not isinstance(targets, (list, tuple, set)): targets = [targets]
+    keep = []
+    for target in targets:
+        rows = df[df['target'] == target]
+        if len(rows) == 0:
+            warnings.warn(f'"{target}" not found in the results; it will not be labeled.')
+            continue
+        is_sig = rows['label'] == hit_label
+        n_skipped = int((~is_sig).sum())
+        if not is_sig.any():
+            warnings.warn(f'"{target}" is not significant ({hit_label} not met); it will not be labeled.')
+            continue
+        if n_skipped:
+            warnings.warn(
+                f'"{target}" has {len(rows)} entries in the library; skipped {n_skipped} '
+                f'that are not significant, labeling the other {int(is_sig.sum())}.')
+        keep.append(rows[is_sig])
+    return pd.concat(keep) if keep else None
 
 
 # def drawRhoGammaScatter(

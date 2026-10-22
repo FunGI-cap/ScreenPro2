@@ -20,7 +20,7 @@ from ..phenoscore import (
 from ..preprocessing import addPseudoCount, findLowCounts, normalizeSeqDepth
 from ..phenoscore._annotate import annotateScoreTable, hit_dict
 from ..phenoscore.phenostat import validateTest, TEST_NAMES
-from ..plotting import volcano_plot, label_resistance_hit, label_sensitivity_hit
+from ..plotting import volcano_plot
 
 import warnings
 from copy import copy
@@ -405,7 +405,7 @@ class PooledScreens(object):
         self.pdata.var = self.adata.var.copy()
     
     def drawVolcano(
-            self, ax,
+            self,
             phenotype_name,
             threshold,
             dot_size=1,
@@ -421,8 +421,9 @@ class PooledScreens(object):
             sensitivity_hits=None,
             size_txt=None,
             t_x=0, t_y=0,
-            **args
+            figure_size=(5, 5),
             ):
+        """Draw a volcano plot of `phenotype_name` and return a plotnine `ggplot` object."""
         if run_name == 'auto': run_name = self._auto_run_name()
         
         score_tag, _ = phenotype_name.split(':')
@@ -443,7 +444,7 @@ class PooledScreens(object):
         )
 
         # p = 0 would give an infinite y value and break the axis limits
-        df['-log10(pvalue)'] = -np.log10(df[pvalue_col].clip(lower=np.finfo(float).tiny))
+        df[f'-log10({pvalue_col})'] = -np.log10(df[pvalue_col].clip(lower=np.finfo(float).tiny))
 
         if xlabel == 'auto':
             xlabel = phenotype_name.replace(':', ': ').replace('_', ' ')
@@ -457,51 +458,18 @@ class PooledScreens(object):
             if test in TEST_NAMES and pvalue_col == f'{test} pvalue':
                 ylabel_note = TEST_NAMES[test]
         
-        volcano_plot(ax, df, 
-                      up_hit=hit_dict[score_tag]['up_hit'], 
-                      down_hit=hit_dict[score_tag]['down_hit'],
-                      score_col=score_col, pvalue_col=pvalue_col,
-                      xlabel=xlabel, ylabel=ylabel, ylabel_note=ylabel_note,
-                      dot_size=dot_size, xlims=xlims, ylims=ylims,
-                      ctrl_label=ctrl_label,
-                      **args)
-        
-        for hits, hit_label, label_fn in [
-            (resistance_hits, hit_dict[score_tag]['up_hit'], label_resistance_hit),
-            (sensitivity_hits, hit_dict[score_tag]['down_hit'], label_sensitivity_hit),
-        ]:
-            if hits is None: continue
-            if not isinstance(hits, (list, tuple, set)): hits = [hits]
-            for hit in hits:
-                sig_df = self._significantTargetRows(df, hit, hit_label)
-                if sig_df is None: continue
-                label_fn(
-                    ax=ax, df_in=sig_df, label=hit,
-                    x_col=score_col,
-                    y_col='-log10(pvalue)',
-                    size=dot_size * 2,
-                    size_txt=size_txt,
-                    t_x=t_x, t_y=t_y
-                )
-
-    @staticmethod
-    def _significantTargetRows(df, target, hit_label):
-        """Rows of `target` annotated as `hit_label`; warns about non-significant input
-        genes and about skipped non-significant entries of multi-target genes."""
-        rows = df[df['target'] == target]
-        if len(rows) == 0:
-            warnings.warn(f'"{target}" not found in the results; it will not be labeled.')
-            return None
-        is_sig = rows['label'].astype(str) == hit_label
-        n_skipped = int((~is_sig).sum())
-        if not is_sig.any():
-            warnings.warn(f'"{target}" is not significant ({hit_label} not met); it will not be labeled.')
-            return None
-        if n_skipped:
-            warnings.warn(
-                f'"{target}" has {len(rows)} entries in the library; skipped {n_skipped} '
-                f'that are not significant, labeling the other {int(is_sig.sum())}.')
-        return df.loc[rows.index[is_sig.values]]
+        return volcano_plot(
+            df,
+            up_hit=hit_dict[score_tag]['up_hit'],
+            down_hit=hit_dict[score_tag]['down_hit'],
+            score_col=score_col, pvalue_col=pvalue_col,
+            xlabel=xlabel, ylabel=ylabel, ylabel_note=ylabel_note,
+            dot_size=dot_size, xlims=xlims, ylims=ylims,
+            ctrl_label=ctrl_label,
+            resistance_hits=resistance_hits, sensitivity_hits=sensitivity_hits,
+            size_txt=size_txt, t_x=t_x, t_y=t_y,
+            figure_size=figure_size,
+        )
 
 
 class GImaps(object):
