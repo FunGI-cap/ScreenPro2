@@ -6,14 +6,17 @@ import anndata as ad
 import pandas as pd
 
 from .phenostat import (
-    matrixStat, multipleTestsCorrection,
+    matrixStat, controlStat, moderatedTTest, multipleTestsCorrection,
     empiricalPValue, empiricalFDR
 )
 
 
 ### Key functions for calculating delta phenotype score
 
-def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', test='ttest', ctrl_label='negative_control', growth_rate=1, filter_type='mean', filter_threshold=40):
+MODERATED_T_NAMES = ('modT', 'moderated-t', 'limma')
+
+
+def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', test=None, ctrl_label='negative_control', growth_rate=1, filter_type='mean', filter_threshold=40):
     """Calculate phenotype score and p-values comparing `cond_test` vs `cond_ref`.
 
     In this function, the phenotype calculation is done by comparing multiple replicates of `cond_test` vs `cond_ref`.
@@ -23,7 +26,7 @@ def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', te
         df_cond_ref (pd.DataFrame): dataframe of condition reference
         df_cond_test (pd.DataFrame): dataframe of condition test
         var_names (str): variable names to use as index in the result dataframe
-        test (str): test to use for calculating p-value ('MW': Mann-Whitney U rank; 'ttest' : t-test)
+        test (str): test to use for calculating p-value ('MW': Mann-Whitney U rank; 'ttest' : t-test; 'modT': moderated t-test on replicate scores)
         ctrl_label (str): control label, default is 'negative_control'
         growth_rate (int): growth rate
         filter_type (str): filter type to apply to low counts ('mean', 'both', 'either')
@@ -56,11 +59,15 @@ def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', te
         growth_rate = growth_rate,
     )
 
+    # compute p-value
+    if test in MODERATED_T_NAMES:
+        # moderated t-test on per-replicate scores (variance shrunk across all elements)
+        p_values = moderatedTTest(scores)
+    else:
+        p_values = matrixStat(x, y, test=test, level = 'col')
+
     # average scores across replicates
     scores = [np.mean(s) for s in scores]
-    
-    # compute p-value
-    p_values = matrixStat(x, y, test=test, level = 'col')
 
     # get adjusted p-values
     adj_p_values = multipleTestsCorrection(p_values)
@@ -71,7 +78,8 @@ def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', te
     scores_series = pd.Series(scores, index=df_cond_ref.index)
     null_scores = scores_series[adat.var.targetType.eq(ctrl_label)].values
     emp_p_values = empiricalPValue(scores_series.values, null_scores)
-    emp_fdr_values = empiricalFDR(scores_series.values, null_scores)
+    emp_fdr_values = empiricalFDR(scores_series.values, null_scores,
+                                  is_null=adat.var.targetType.eq(ctrl_label).values)
 
     # get target information            
     targets_df = adat.var[var_names].copy()
@@ -91,7 +99,7 @@ def compareByReplicates(adata, df_cond_ref, df_cond_test, var_names='target', te
     return result
 
 
-def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names='target', test='ttest', ctrl_label='negative_control', growth_rate=1, filter_type='mean', filter_threshold=40):
+def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names='target', test=None, ctrl_label='negative_control', growth_rate=1, filter_type='mean', filter_threshold=40):
     """Calculate phenotype score and p-values comparing `cond_test` vs `cond_ref`.
 
     In this function, the phenotype calculation is done by comparing groups of 
@@ -104,7 +112,7 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
         df_cond_test (pd.DataFrame): dataframe of condition test
         keep_top_n (int): number of top guide elements to keep
         var_names (str): variable names to use as index in the result dataframe
-        test (str): test to use for calculating p-value ('MW': Mann-Whitney U rank; 'ttest' : t-test)
+        test (str): test to use for calculating p-value ('MW': Mann-Whitney U rank; 'ttest' : t-test; 'modT': moderated t-test on replicate scores)
         ctrl_label (str): control label, default is 'negative_control'
         growth_rate (int): growth rate
         filter_type (str): filter type to apply to low counts ('mean', 'both', 'either')
@@ -127,6 +135,9 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
     x_ctrl = df_cond_ref[adat.var.targetType.eq(ctrl_label)].dropna().to_numpy()
     y_ctrl = df_cond_test[adat.var.targetType.eq(ctrl_label)].dropna().to_numpy()
 
+    # non-targeting guide scores, used as the reference group for MW
+    ctrl_scores = calculateDelta(x=x_ctrl, y=y_ctrl, x_ctrl=x_ctrl, y_ctrl=y_ctrl, growth_rate=growth_rate)
+
     targets = []
     scores = []
     p_values = []
@@ -143,7 +154,8 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
             df_cond_test=df_cond_test,
             x_ctrl=x_ctrl, y_ctrl=y_ctrl, 
             test=test, growth_rate=growth_rate, 
-            keep_top_n=keep_top_n
+            keep_top_n=keep_top_n,
+            ctrl_scores=ctrl_scores
         )
         
         scores.append(target_score)
@@ -151,11 +163,15 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
         targets.append(target_name)
         target_sizes.append(target_size)
 
+    if test in MODERATED_T_NAMES:
+        # per-replicate target scores (genes x replicates); variance shrunk across all targets
+        p_values = moderatedTTest(np.vstack(scores))
+
     # average scores across replicates
     scores = [np.mean(s) for s in scores]
 
     # get adjusted p-values
-    adj_p_values = multipleTestsCorrection(np.array(p_values))
+    adj_p_values = multipleTestsCorrection(np.array(p_values, dtype=float))
 
     # compute empirical p-values and FDR using pseudogene (null) score distribution
     scores_array = np.array(scores)
@@ -172,7 +188,7 @@ def compareByTargetGroup(adata, df_cond_ref, df_cond_test, keep_top_n, var_names
         null_mask = np.zeros(len(targets), dtype=bool)
     null_scores = scores_array[null_mask]
     emp_p_values = empiricalPValue(scores_array, null_scores)
-    emp_fdr_values = empiricalFDR(scores_array, null_scores)
+    emp_fdr_values = empiricalFDR(scores_array, null_scores, is_null=null_mask)
 
     # get target information
     if type(var_names) == str:
@@ -293,7 +309,7 @@ def getBestTargetByTSS(score_df,target_col,pvalue_col):
     )
 
 
-def scoreTargetGroup(target_group, df_cond_ref, df_cond_test, x_ctrl, y_ctrl, test='ttest', growth_rate=1, keep_top_n=None):
+def scoreTargetGroup(target_group, df_cond_ref, df_cond_test, x_ctrl, y_ctrl, test=None, growth_rate=1, keep_top_n=None, ctrl_scores=None):
     # select target group and convert to numpy arrays
     x = df_cond_ref.loc[target_group.index,:].dropna().to_numpy()
     y = df_cond_test.loc[target_group.index,:].dropna().to_numpy()
@@ -310,21 +326,36 @@ def scoreTargetGroup(target_group, df_cond_ref, df_cond_test, x_ctrl, y_ctrl, te
     
     if target_size == 0:
         target_score = np.full(target_scores.shape[1], np.nan)
-    
-    elif (keep_top_n is None or keep_top_n is False) or target_size <= keep_top_n:
-        # average scores across guides
-        target_score = np.mean(target_scores, axis=0)
 
-    elif keep_top_n > 0 or target_size > keep_top_n:
-        # get top n scores per target
-        target_score = np.apply_along_axis(averageBestN, axis=0, arr=target_scores, numToAverage=keep_top_n)
-        target_size = keep_top_n # update target size to keep_top_n
-    
+    elif keep_top_n is None or keep_top_n is False:
+        pass
+
+    elif keep_top_n > 0:
+        if target_size > keep_top_n:
+            # keep the n guides with the largest |mean score across replicates|; the same
+            # guides are used for both the target score and the p-value
+            top = np.argsort(-np.abs(np.nanmean(target_scores, axis=1)), kind='stable')[:keep_top_n]
+            target_scores, x, y = target_scores[top], x[top], y[top]
+            target_size = keep_top_n
+
     else:
         raise ValueError(f'Invalid value for keep_top_n: {keep_top_n}')
 
+    if target_size > 0:
+        # average scores across (selected) guides
+        target_score = np.mean(target_scores, axis=0)
+
     # compute p-value
-    target_p_value = matrixStat(x, y, test=test, level='all')
+    if test in MODERATED_T_NAMES:
+        # computed across all targets once their per-replicate scores are known
+        target_p_value = np.nan
+    elif test in ('MW', 'Mann-Whitney') and target_size > 0:
+        # guide scores vs non-targeting guide scores (independent groups, guide = unit)
+        if ctrl_scores is None:
+            ctrl_scores = calculateDelta(x=x_ctrl, y=y_ctrl, x_ctrl=x_ctrl, y_ctrl=y_ctrl, growth_rate=growth_rate)
+        target_p_value = controlStat(target_scores, ctrl_scores, test='MW')
+    else:
+        target_p_value = matrixStat(x, y, test=test, level='all')
     
     return target_score, target_p_value, target_size
 
@@ -360,6 +391,9 @@ def generatePseudoGeneAnnData(adata, num_pseudogenes='auto', pseudogene_size='au
 
     for pseudo_num in range(0, num_pseudogenes, pseudogene_size):
         pseudo_elements = np.random.choice(ctrl_elements, pseudogene_size, replace=False)
+        # keep library column order: X is subset in that order, so `source` must match it
+        chosen = set(pseudo_elements)
+        pseudo_elements = [e for e in ctrl_elements if e in chosen]
         pseudo_labels = [f'pseudo_{pseudo_num}_{i}' for i in range(1,pseudogene_size+1)]
         
         adata_pseudo = ad.AnnData(

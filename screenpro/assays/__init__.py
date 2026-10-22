@@ -1,4 +1,4 @@
-## Copyright (c) 2022-2025 ScreenPro2 Development Team.
+## Copyright (c) 2022-2026 ScreenPro2 Development Team.
 ## All rights reserved.
 ## Gilbart Lab, UCSF / Arc Institute.
 ## Multi-Omics Tech Center, Arc Insititue.
@@ -19,6 +19,7 @@ from ..phenoscore import (
 )
 from ..preprocessing import addPseudoCount, findLowCounts, normalizeSeqDepth
 from ..phenoscore._annotate import annotateScoreTable, hit_dict
+from ..phenoscore.phenostat import validateTest
 from ..plotting import volcano_plot, label_resistance_hit, label_sensitivity_hit
 
 import warnings
@@ -30,17 +31,19 @@ class PooledScreens(object):
     pooledScreens class for processing CRISPR screen datasets
     """
 
-    def __init__(self, adata, test='ttest', n_reps=3, verbose=False):
+    def __init__(self, adata, test=None, n_reps=3, verbose=False):
         """
         Args:
             adata (AnnData): AnnData object with adata.X as a matrix of sgRNA counts
-            test (str): statistical test to use for calculating phenotype scores
+            test (str): statistical test to use for calculating phenotype scores, required:
+                'modT' (moderated t-test on replicate scores), 'MW' (Mann-Whitney U),
+                'KS' (Kolmogorov-Smirnov), or 'ttest' (legacy paired t-test on log10 counts)
             n_reps (int): number of replicates to use for calculating phenotype scores
             verbose (bool): whether to print verbose output
         """
         self.adata = adata.copy()
         self.pdata = None
-        self.test = test
+        self.test = validateTest(test)
         self.n_reps = n_reps
         self.phenotypes = {}
         self.verbose = verbose

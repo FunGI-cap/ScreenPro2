@@ -227,7 +227,7 @@ Once you have the counts, you can use ScreenPro2 `phenoscore` and `phenostats` m
       var = target_df  # pandas dataframe of targets metadata including "target" and "targetType" columns
   )
 
-  screen = PooledScreens(adata)
+  screen = PooledScreens(adata, test='modT')  # 'modT', 'MW', 'KS' or legacy 'ttest'
   ```
 
   <img width="600" alt="image" src="https://github.com/ArcInstitute/ScreenPro2/assets/53412130/bb38d119-8f24-44fa-98ab-7ef4457ef8d2">

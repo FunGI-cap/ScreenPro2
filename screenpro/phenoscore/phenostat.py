@@ -2,10 +2,55 @@
 phenostat module: internal module for statistical analysis of phenoscore data.
 """
 
-from scipy.stats import ttest_rel, mannwhitneyu, ks_2samp
+from scipy.stats import ttest_rel, mannwhitneyu, ks_2samp, t as t_dist
+from scipy.special import digamma, polygamma
 import numpy as np
 from statsmodels.stats.multitest import multipletests
 import warnings
+from math import comb
+
+
+## Registry of statistical tests exposed to users
+
+# canonical name -> (aliases, one-line description shown in error messages / docs)
+TESTS = {
+    'modT':  (('moderated-t', 'limma'),
+              "reproducible across biological replicates (moderated t-test on replicate scores)"),
+    'MW':    (('Mann-Whitney',),
+              "gene's guides differ from non-targeting guides (Mann-Whitney U rank test)"),
+    'KS':    (('Kolmogorov-Smirnov',),
+              "guide score distribution differs from non-targeting guides (Kolmogorov-Smirnov test)"),
+    'ttest': (('TT', 'T-test'),
+              "legacy paired t-test on log10 counts (pseudoreplicated; use to reproduce v0.7 results)"),
+}
+
+
+def validateTest(test):
+    """Check a user-supplied ``test`` name and return its canonical form.
+
+    ``test`` has no default anywhere in the public API: the statistical test
+    must match the question being asked, so the user has to choose one.
+
+    Parameters:
+        test (str): test name or alias (see ``TESTS``)
+
+    Returns:
+        str: canonical test name
+
+    Raises:
+        ValueError: if ``test`` is None or not recognized, with the list of options
+    """
+    if test is not None:
+        for name, (aliases, _) in TESTS.items():
+            if test == name or test in aliases:
+                return name
+
+    options = '\n'.join(f"  {name!r:8} {desc}" for name, (_, desc) in TESTS.items())
+    problem = '`test` is required.' if test is None else f'Test {test!r} not recognized.'
+    raise ValueError(
+        f"{problem} Choose the test that matches your question:\n{options}\n"
+        "Empirical p-values and FDR against non-targeting controls are always reported."
+    )
 
 
 ## Core functions for statistical analysis of phenoscore data
@@ -22,10 +67,14 @@ def matrixStat(x, y, test, level, transform='log10'):
       sufficient (n >= 3 pairs). This is the standard choice for CRISPR screens
       with biological replicates.
 
-    - ``MW``: Mann-Whitney U rank test (non-parametric). Does not assume normality
-      and is more robust for small samples or skewed distributions. Appropriate when
-      comparing groups of guide elements targeting the same gene, where values may
-      not be normally distributed or sample sizes are too small for the t-test.
+    - ``MW``: Mann-Whitney U rank test (non-parametric, *independent* samples).
+      Does not assume normality. Caveats for this function: (1) ``x`` and ``y`` here
+      are paired (same guide, same replicate), but MW ignores that pairing, so
+      guide-to-guide baseline abundance dominates the variance and power is poor;
+      (2) with n replicates per condition the exact two-sided p-value cannot go
+      below ``2 / C(2n, n)`` (0.1 for n=3), so no element can pass a 0.05 cutoff
+      (a warning is emitted). For gene-level MW use :func:`controlStat`, which
+      compares guide-level scores against non-targeting guide scores instead.
 
     - ``KS``: Kolmogorov-Smirnov test (non-parametric). Tests whether two samples
       are drawn from the same continuous distribution, sensitive to differences in
@@ -54,6 +103,9 @@ def matrixStat(x, y, test, level, transform='log10'):
     
     # calculate p-values
     if test == 'MW' or test == 'Mann-Whitney':
+        if level in ('col', 'row'):
+            _warn_if_exact_floor(n_x=x.shape[1 if level == 'col' else 0],
+                                 n_y=y.shape[1 if level == 'col' else 0])
         # run Mann-Whitney U rank test (non-parametric, independent samples)
         if level == 'col':
             p_value = np.array([
@@ -108,9 +160,139 @@ def matrixStat(x, y, test, level, transform='log10'):
         raise ValueError(f'Test "{test}" not recognized')
 
 
+## Empirical-Bayes moderated t-test (limma-style, Smyth 2004)
+
+def _trigammaInverse(x, tol=1e-8, max_iter=50):
+    """Solve ``trigamma(y) = x`` for y by Newton iteration (as in limma::trigammaInverse)."""
+    if np.isnan(x):
+        return np.nan
+    if x > 1e7:
+        return 1 / np.sqrt(x)
+    if x < 1e-6:
+        return 1 / x
+    y = 0.5 + 1 / x
+    for _ in range(max_iter):
+        tri = polygamma(1, y)
+        dif = tri * (1 - tri / x) / polygamma(2, y)
+        y = y + dif
+        if -dif / y < tol:
+            break
+    return y
+
+
+def fitPriorVariance(s2, df):
+    """Fit a scaled inverse chi-square prior to per-element sample variances.
+
+    Model (Smyth 2004): element variances ``sigma_g^2 ~ s0^2 * d0 / chi2_{d0}`` and
+    sample variances ``s_g^2 | sigma_g^2 ~ sigma_g^2 * chi2_{d_g} / d_g``. Marginally
+    ``s_g^2 / s0^2 ~ F(d_g, d0)``. Parameters are estimated by the method of moments
+    on ``z = log(s2) - digamma(d/2) + log(d/2)``, which has mean
+    ``log(s0^2) - digamma(d0/2) + log(d0/2)`` and variance
+    ``trigamma(d/2) + trigamma(d0/2)``.
+
+    Parameters:
+        s2 (np.array): sample variances
+        df (np.array): residual degrees of freedom of each variance
+
+    Returns:
+        tuple: (s0_sq, d0); ``d0`` is ``np.inf`` when variances are homogeneous
+    """
+    s2 = np.asarray(s2, dtype=float)
+    df = np.asarray(df, dtype=float)
+    ok = np.isfinite(s2) & (df > 0)
+    s2, df = s2[ok], df[ok]
+    if len(s2) < 2:
+        return np.nan, np.nan
+
+    # guard against exact zeros (e.g. identical replicates) before taking logs
+    s2 = np.maximum(s2, 1e-5 * np.median(s2)) if np.median(s2) > 0 else np.maximum(s2, 1e-10)
+
+    z = np.log(s2) - digamma(df / 2) + np.log(df / 2)
+    z_mean = z.mean()
+    z_var = np.sum((z - z_mean) ** 2) / (len(z) - 1) - np.mean(polygamma(1, df / 2))
+
+    if z_var > 0:
+        d0 = 2 * _trigammaInverse(z_var)
+        s0_sq = np.exp(z_mean + digamma(d0 / 2) - np.log(d0 / 2))
+    else:
+        d0 = np.inf
+        s0_sq = np.exp(z_mean)
+    return s0_sq, d0
+
+
+def moderatedTTest(scores, return_details=False):
+    """Moderated one-sample t-test of per-replicate scores against zero.
+
+    Each row of ``scores`` is one element (guide, transcript or gene) and each column
+    one biological replicate. Scores are expected to be on the phenotype scale
+    (e.g. delta/gamma/tau/rho) and centred on non-targeting controls, so that the
+    null hypothesis is a mean of 0.
+
+    With only 2-3 replicates the per-element sample variance is very noisy: elements
+    that happen to have tightly agreeing replicates get huge t-statistics. The
+    empirical-Bayes step shrinks each variance towards a prior fitted across all
+    elements (see :func:`fitPriorVariance`):
+
+    .. math::
+
+        \\tilde{s}_g^2 = \\frac{d_0 s_0^2 + d_g s_g^2}{d_0 + d_g}, \\qquad
+        t_g = \\frac{\\bar{x}_g}{\\tilde{s}_g / \\sqrt{n_g}} \\sim t_{d_0 + d_g}
+
+    so the test gains ``d0`` extra degrees of freedom. Elements with fewer than 2
+    finite replicates get NaN.
+
+    Parameters:
+        scores (np.array): matrix of shape (n_elements, n_replicates); NaN/inf are ignored
+        return_details (bool): also return dict with t, df, moderated variance, prior
+
+    Returns:
+        np.array: two-sided p-values (or ``(p_values, details)``)
+    """
+    scores = np.asarray(scores, dtype=float)
+    if scores.ndim != 2:
+        raise ValueError('scores must be a 2D (elements x replicates) array')
+    scores = np.where(np.isfinite(scores), scores, np.nan)
+
+    n = np.sum(~np.isnan(scores), axis=1)
+    df = n - 1
+    usable = n >= 2
+
+    mean = np.full(len(scores), np.nan)
+    s2 = np.full(len(scores), np.nan)
+    mean[usable] = np.nanmean(scores[usable], axis=1)
+    s2[usable] = np.nanvar(scores[usable], axis=1, ddof=1)
+
+    s0_sq, d0 = fitPriorVariance(s2[usable], df[usable])
+
+    if np.isnan(d0):  # too few elements to fit a prior: fall back to ordinary t
+        d0, s0_sq = 0.0, 0.0
+    if np.isinf(d0):
+        s2_post = np.full(len(scores), s0_sq)
+        df_total = np.full(len(scores), np.inf)
+    else:
+        s2_post = (d0 * s0_sq + df * s2) / (d0 + df)
+        df_total = d0 + df
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t_stat = mean / np.sqrt(s2_post / n)
+    p_values = 2 * t_dist.sf(np.abs(t_stat), df_total)
+    p_values[~usable] = np.nan
+
+    if return_details:
+        return p_values, {
+            't': t_stat, 'df': df_total, 'mean': mean, 'var_moderated': s2_post,
+            'var_prior': s0_sq, 'df_prior': d0,
+        }
+    return p_values
+
+
 def multipleTestsCorrection(p_values, method='fdr_bh'):
     """
     Calculate adjusted p-values using multiple testing correction.
+
+    Tests that could not be run (NaN p-values) are excluded from the correction,
+    so they do not inflate the number of hypotheses, and get NaN adjusted p-values.
+    The input array is not modified.
 
     Parameters:
         p_values (np.array): array of p-values
@@ -119,27 +301,72 @@ def multipleTestsCorrection(p_values, method='fdr_bh'):
     Returns:
         np.array: array of adjusted p-values
     """
-    if method == 'fdr_bh':
-        # fill na with 1
-        p_values[np.isnan(p_values)] = 1
-        # Calculate the adjusted p-values using the Benjamini-Hochberg method
-        if p_values is None:
-            raise ValueError('p_values is None')
-        _, adj_p_values, _, _ = multipletests(p_values, alpha=0.05, method='fdr_bh')
-    
-    else:
+    if p_values is None:
+        raise ValueError('p_values is None')
+    if method != 'fdr_bh':
         raise ValueError(f'Method "{method}" not recognized')
 
+    p_values = np.asarray(p_values, dtype=float)
+    adj_p_values = np.full(p_values.shape, np.nan)
+    valid = ~np.isnan(p_values)
+    if valid.any():
+        adj_p_values[valid] = multipletests(p_values[valid], alpha=0.05, method='fdr_bh')[1]
+
     return adj_p_values
+
+
+def controlStat(scores, null_scores, test='MW'):
+    """Test guide-level scores of one target against non-targeting guide scores.
+
+    Unlike :func:`matrixStat`, the compared groups are genuinely independent
+    (guides of a target vs. non-targeting guides) and the unit of replication is
+    the guide, with replicates already collapsed into one score per guide. This
+    avoids both the unpaired-on-paired-data problem and pseudoreplication
+    (guides x replicates entries treated as independent observations).
+
+    Parameters:
+        scores (array-like): per-guide scores of the target, shape (n_guides,) or
+            (n_guides, n_reps); replicates are averaged per guide
+        null_scores (array-like): per-guide scores of non-targeting controls, same layout
+        test (str): 'MW' (Mann-Whitney U) or 'KS' (Kolmogorov-Smirnov)
+
+    Returns:
+        float: p-value (NaN if either group has fewer than 2 guides)
+    """
+    def _per_guide(a):
+        a = np.asarray(a, dtype=float)
+        return np.nanmean(a, axis=1) if a.ndim == 2 else a
+
+    if test in ('MW', 'Mann-Whitney'):
+        return _mannwhitneyu_safe(_per_guide(scores), _per_guide(null_scores))
+    elif test in ('KS', 'Kolmogorov-Smirnov'):
+        return _ks_2samp_safe(_per_guide(scores), _per_guide(null_scores))
+    raise ValueError(f'Test "{test}" not supported for control comparison')
+
+
+def _nullTailFraction(values, null_sorted, side):
+    """Number of null scores at least as extreme as each value, in direction ``side``.
+
+    ``side='less'`` counts null <= value and ``side='greater'`` counts null >= value.
+    """
+    if side == 'less':
+        return np.searchsorted(null_sorted, values, side='right')
+    return len(null_sorted) - np.searchsorted(null_sorted, values, side='left')
 
 
 def empiricalPValue(scores, null_scores, tail='two-sided'):
     """Calculate empirical p-values by comparing scores to a null distribution.
 
-    For each score in ``scores``, the empirical p-value is the proportion of
-    null scores that are at least as extreme as the observed score. A pseudocount
-    of 1 is added to both numerator and denominator to avoid p-values of zero
-    and to account for the finite size of the null distribution.
+    The null distribution is the scores of non-targeting controls (or pseudogenes
+    built from them), computed with the *same* procedure as the scores being tested
+    (same replicate averaging, same number of guides, same top-n selection). For each
+    score the one-sided empirical p-value is the fraction of null scores at least as
+    extreme in that direction, with a pseudocount of 1 in numerator and denominator
+    so p is never 0 (smallest value is ``1 / (n_null + 1)``).
+
+    For ``tail='two-sided'`` the p-value is ``2 * min(p_less, p_greater)`` capped
+    at 1. Unlike comparing ``|null| >= |score|``, this does not assume the null is
+    symmetric around zero, which matters when controls are skewed or off-centre.
 
     Parameters:
         scores (array-like): observed phenotype scores
@@ -149,95 +376,104 @@ def empiricalPValue(scores, null_scores, tail='two-sided'):
     Returns:
         np.array: array of empirical p-values in [0, 1]
     """
+    if tail not in ('two-sided', 'less', 'greater'):
+        raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
+
     scores = np.asarray(scores, dtype=float)
     null_scores = np.asarray(null_scores, dtype=float)
-    null_scores = null_scores[~np.isnan(null_scores)]
-    n_null = len(null_scores)
+    null_sorted = np.sort(null_scores[~np.isnan(null_scores)])
+    n_null = len(null_sorted)
 
     if n_null == 0:
         return np.full(len(scores), np.nan)
 
-    p_values = np.empty(len(scores))
+    p_values = np.full(len(scores), np.nan)
+    ok = ~np.isnan(scores)
+    p_less = (_nullTailFraction(scores[ok], null_sorted, 'less') + 1) / (n_null + 1)
+    p_greater = (_nullTailFraction(scores[ok], null_sorted, 'greater') + 1) / (n_null + 1)
 
-    for i, score in enumerate(scores):
-        if np.isnan(score):
-            p_values[i] = np.nan
-            continue
-
-        if tail == 'two-sided':
-            n_extreme = np.sum(np.abs(null_scores) >= np.abs(score))
-        elif tail == 'less':
-            n_extreme = np.sum(null_scores <= score)
-        elif tail == 'greater':
-            n_extreme = np.sum(null_scores >= score)
-        else:
-            raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
-
-        # pseudocount of 1 in numerator and denominator
-        p_values[i] = (n_extreme + 1) / (n_null + 1)
+    if tail == 'less':
+        p_values[ok] = p_less
+    elif tail == 'greater':
+        p_values[ok] = p_greater
+    else:
+        p_values[ok] = np.minimum(2 * np.minimum(p_less, p_greater), 1.0)
 
     return p_values
 
 
-def empiricalFDR(scores, null_scores, tail='two-sided'):
-    """Calculate empirical FDR by comparing scores to a null distribution.
+def empiricalFDR(scores, null_scores, tail='two-sided', is_null=None):
+    """Calculate empirical FDR (q-value) by comparing scores to a null distribution.
 
-    For each threshold defined by an observed score, the empirical FDR is:
+    For a threshold at score ``s``:
 
     .. math::
 
         \\text{FDR}(s) = \\frac{\\text{expected false positives}}{\\text{observed positives}}
 
-    where *expected false positives* = ``(# null extreme) / n_null * n_genes``
-    and *observed positives* = ``# gene scores at least as extreme as s``.
+    where *expected false positives* = ``(# null at least as extreme as s) / n_null * n_tested``
+    and *observed positives* = ``# tested scores at least as extreme as s``.
 
-    This approach provides direct FDR control using the empirical null distribution
-    from non-targeting controls, without relying on parametric assumptions or
-    multiple-testing correction procedures.
+    Details that matter:
+
+    - ``is_null`` marks entries of ``scores`` that are themselves controls or
+      pseudogenes. They are excluded from the tested set (``n_tested`` and the
+      observed positives), otherwise null entries dilute the estimate towards 1.
+      FDR is reported only for tested entries; null entries get NaN.
+    - ``tail='two-sided'`` is evaluated per direction (negative scores against the
+      lower tail of the null, positive against the upper tail), so an off-centre or
+      skewed null does not mix depleted and enriched hits.
+    - The result is made monotone (a q-value): an entry's FDR is the smallest FDR
+      over all thresholds at least as lenient as its own score.
+    - ``pi0`` (fraction of truly null tested entries) is taken as 1, which is conservative.
 
     Parameters:
-        scores (array-like): observed phenotype scores (e.g. targeting genes)
+        scores (array-like): observed phenotype scores
         null_scores (array-like): null/non-targeting control scores
         tail (str): 'two-sided' (default), 'less', or 'greater'
+        is_null (array-like of bool, optional): which entries of ``scores`` are null items
 
     Returns:
-        np.array: array of empirical FDR values clipped to [0, 1]
+        np.array: array of empirical FDR values in [0, 1]; NaN for null or missing scores
     """
+    if tail not in ('two-sided', 'less', 'greater'):
+        raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
+
     scores = np.asarray(scores, dtype=float)
     null_scores = np.asarray(null_scores, dtype=float)
-    null_scores = null_scores[~np.isnan(null_scores)]
-    n_null = len(null_scores)
-    n_genes = np.sum(~np.isnan(scores))
+    null_sorted = np.sort(null_scores[~np.isnan(null_scores)])
+    n_null = len(null_sorted)
 
-    if n_null == 0 or n_genes == 0:
-        return np.full(len(scores), np.nan)
+    is_null = np.zeros(len(scores), dtype=bool) if is_null is None else np.asarray(is_null, dtype=bool)
+    tested = ~np.isnan(scores) & ~is_null
+    n_tested = int(tested.sum())
 
-    fdr_values = np.empty(len(scores))
+    fdr_values = np.full(len(scores), np.nan)
+    if n_null == 0 or n_tested == 0:
+        return fdr_values
 
-    for i, score in enumerate(scores):
-        if np.isnan(score):
-            fdr_values[i] = np.nan
+    tested_sorted = np.sort(scores[tested])
+    sides = {'less': ['less'], 'greater': ['greater'], 'two-sided': ['less', 'greater']}[tail]
+
+    for side in sides:
+        if tail == 'two-sided':
+            mask = tested & ((scores < 0) if side == 'less' else (scores >= 0))
+        else:
+            mask = tested
+        idx = np.where(mask)[0]
+        if len(idx) == 0:
             continue
 
-        if tail == 'two-sided':
-            n_extreme_null = np.sum(np.abs(null_scores) >= np.abs(score))
-            n_extreme_genes = np.sum(np.abs(scores[~np.isnan(scores)]) >= np.abs(score))
-        elif tail == 'less':
-            n_extreme_null = np.sum(null_scores <= score)
-            n_extreme_genes = np.sum(scores[~np.isnan(scores)] <= score)
-        elif tail == 'greater':
-            n_extreme_null = np.sum(null_scores >= score)
-            n_extreme_genes = np.sum(scores[~np.isnan(scores)] >= score)
-        else:
-            raise ValueError(f'Tail "{tail}" not recognized. Use "two-sided", "less", or "greater".')
+        vals = scores[idx]
+        expected_fp = _nullTailFraction(vals, null_sorted, side) / n_null * n_tested
+        observed = _nullTailFraction(vals, tested_sorted, side)  # >= 1: each score counts itself
+        fdr = np.minimum(expected_fp / observed, 1.0)
 
-        # expected false positives normalized to gene sample size
-        expected_fp = (n_extreme_null / n_null) * n_genes
-
-        if n_extreme_genes > 0:
-            fdr_values[i] = min(expected_fp / n_extreme_genes, 1.0)
-        else:
-            fdr_values[i] = 0.0
+        # q-value: minimum over all thresholds at least as lenient (less extreme)
+        order = np.argsort(np.abs(vals), kind='stable')
+        q = np.empty_like(fdr)
+        q[order] = np.minimum.accumulate(fdr[order])
+        fdr_values[idx] = q
 
     return fdr_values
 
@@ -261,3 +497,16 @@ def _ks_2samp_safe(y, x):
     if len(y_clean) < 2 or len(x_clean) < 2:
         return np.nan
     return ks_2samp(y_clean, x_clean)[1]
+
+
+def _warn_if_exact_floor(n_x, n_y, alpha=0.05):
+    """Warn when the smallest attainable two-sided exact MW p-value exceeds alpha."""
+    if n_x < 1 or n_y < 1:
+        return
+    min_p = 2 / comb(n_x + n_y, n_x)
+    if min_p > alpha:
+        warnings.warn(
+            f'Mann-Whitney with {n_x} vs {n_y} replicates cannot give a two-sided '
+            f'p-value below {min_p:.3g}; no element can reach p < {alpha}.',
+            UserWarning, stacklevel=3
+        )

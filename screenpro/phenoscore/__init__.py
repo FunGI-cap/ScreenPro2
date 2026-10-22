@@ -22,12 +22,12 @@ from .delta import (
 )
 from .deseq import runDESeq, extractDESeqResults
 from ._annotate import annotateScoreTable
-from .phenostat import matrixStat, multipleTestsCorrection, empiricalPValue, empiricalFDR
+from .phenostat import validateTest, matrixStat, controlStat, moderatedTTest, multipleTestsCorrection, empiricalPValue, empiricalFDR
 
 
 def runPhenoScore(adata, cond_ref, cond_test, score_level, 
                   var_names='target', collapse_var=False,
-                  test='ttest', growth_rate=1, n_reps='auto', keep_top_n = None, 
+                  test=None, growth_rate=1, n_reps='auto', keep_top_n = None, 
                   num_pseudogenes='auto', pseudogene_size='auto',
                   count_layer=None, count_filter_type='mean', count_filter_threshold=40,
                   ctrl_label='negative_control'
@@ -41,7 +41,7 @@ def runPhenoScore(adata, cond_ref, cond_test, score_level,
         score_level (str): score level
         var_names (str): variable names to use as index in the result dataframe
         collapse_var (str): variable to use for `getBestTargetByTSS` function, default is False
-        test (str): test to use for calculating p-value ('MW': Mann-Whitney U rank; 'ttest' : t-test)
+        test (str): statistical test, required; one of 'modT', 'MW', 'KS', 'ttest' (see phenostat.TESTS)
         growth_rate (int): growth rate
         n_reps (int): number of replicates
         keep_top_n (int): number of top guides to keep per target
@@ -56,6 +56,7 @@ def runPhenoScore(adata, cond_ref, cond_test, score_level,
         str: result name
         pd.DataFrame: result dataframe
     """
+    test = validateTest(test)
     adat = adata.copy()
 
     if 'condition' not in adat.obs.columns:
